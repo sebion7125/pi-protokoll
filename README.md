@@ -35,7 +35,8 @@ Messages you send while the model is working belong to the running turn.
    collapsed (`▸ protocol turn 7: …`). The extension numbers the turns, not the model.
 3. **Block missing.** The extension asks once more with the unchanged context plus a short
    instruction. The prompt starts like the one just run, so a prefix cache only reads the new
-   tokens. Only the block is kept, not the exchange.
+   tokens. Only the block is kept, not the exchange. If the model ignores the request, the block is written
+   from the turn's transcript right away.
 4. **Turn interrupted** (Esc, error, output limit). Before your next message goes out, the
    protocol of the interrupted turn is written: what was done, what is still open. Tool calls
    the model makes out of habit are answered with "tools unavailable" and not executed. If

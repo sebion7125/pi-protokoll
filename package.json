@@ -1,6 +1,6 @@
 {
 	"name": "pi-protokoll",
-	"version": "0.9.0",
+	"version": "0.9.1",
 	"description": "Pi extension: a running per-turn protocol replaces summarizing compaction \u2013 fast, bounded compaction for very long sessions with local models",
 	"type": "module",
 	"license": "MIT",

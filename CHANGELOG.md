@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 – 2026-10-24
+
+- When the model ignores the follow-up request for a missing block, the block is written from the turn's transcript right away instead of waiting for the next compaction.
+
 ## 0.9.0 – 2026-10-24
 
 First packaged release (previously installed by hand into `~/.pi/agent/extensions/protokoll/`).

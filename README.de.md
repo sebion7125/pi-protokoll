@@ -39,7 +39,8 @@ gehören zum laufenden Zug.
    Erweiterung, nicht das Modell.
 3. **Block fehlt.** Einmalige Nachforderung mit unverändertem Kontext plus kurzer Anweisung.
    Der Prompt beginnt wie der gerade gelaufene, ein Präfix-Cache liest also nur die neuen Token.
-   Gespeichert wird nur der Block, nicht der Austausch.
+   Gespeichert wird nur der Block, nicht der Austausch. Ignoriert das Modell die Nachforderung, wird der Block
+   sofort aus dem Transkript des Zugs geschrieben.
 4. **Zug abgebrochen** (Esc, Fehler, Ausgabelimit). Bevor deine nächste Nachricht rausgeht,
    wird das Protokoll des abgebrochenen Zugs geschrieben: was erledigt ist, was offen bleibt.
    Werkzeugaufrufe aus Gewohnheit werden mit „Werkzeuge nicht verfügbar“ beantwortet, nicht

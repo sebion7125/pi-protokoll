@@ -181,6 +181,17 @@ describe("protokoll extension", () => {
 		expect(h.notes.some((n) => n.includes("has no protocol"))).toBe(true);
 	});
 
+	it("writes the block from the transcript when the follow-up is ignored", async () => {
+		h = harness(["I will continue with the task now", "<protocol>\nresult: fog added\n</protocol>"]);
+		await h.fire("session_start", { reason: "startup" });
+		const { draft } = await h.turn("please add fog", "answer");
+		expect(draft?.source).toBe("backfill");
+		expect(draft?.fields?.result).toEqual(["fog added"]);
+		const transcriptPrompt = h.requests[1].context.messages[0].content as string;
+		expect(transcriptPrompt).toContain("<transcript>");
+		expect(transcriptPrompt).toContain("please add fog");
+	});
+
 	it("does nothing after /protokoll aus", async () => {
 		await h.commands.get("protokoll").handler("aus", h.ctx);
 		const { sections, message, draft } = await h.turn("q", "A\n<protocol>result: x</protocol>");

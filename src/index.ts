@@ -616,11 +616,7 @@ export default function protokoll(pi: ExtensionAPI) {
 		};
 	});
 
-	async function followUp(
-		llmMessages: unknown[],
-		turn: { userEntryId: string; number: number },
-		ctx: ExtensionContext,
-	): Promise<ProtocolEntryData> {
+	async function followUp(llmMessages: unknown[], turn: Turn, ctx: ExtensionContext): Promise<ProtocolEntryData> {
 		const base = { version: 1 as const, userEntryId: turn.userEntryId, turn: turn.number };
 		const model = ctx.model;
 		if (!model) return { ...base, source: "missing" };
@@ -649,9 +645,19 @@ export default function protokoll(pi: ExtensionAPI) {
 				return { ...base, source: "followup", fields, raw: body ?? text };
 			}
 			const reason = failureReason(reply, signal);
+			// the model ignored the request: write the block from the transcript right away
+			// (no chat context, so no tools to call and no habit of continuing the task)
+			if (!signal.aborted) {
+				step.label = `turn ${turn.number}: protocol from the transcript (${reason})`;
+				const data = await backfillByTranscript(ctx, turn, signal, { bar, step });
+				if (data) {
+					bar.finish(step, true);
+					return data;
+				}
+			}
 			bar.finish(step, false, reason);
 			ctx.ui.notify(
-				`protokoll: turn ${turn.number} has no protocol (${reason}) – next attempt at compaction`,
+				`protokoll: turn ${turn.number} has no protocol (${reason}; transcript: ${lastFailure}) – next attempt at compaction`,
 				"warning",
 			);
 			return { ...base, source: "missing" };
