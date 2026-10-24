@@ -4,6 +4,15 @@
 	"description": "Pi extension: a running per-turn protocol replaces summarizing compaction \u2013 fast, bounded compaction for very long sessions with local models",
 	"type": "module",
 	"license": "MIT",
+	"author": "sebion7125",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/sebion7125/pi-protokoll.git"
+	},
+	"homepage": "https://github.com/sebion7125/pi-protokoll#readme",
+	"bugs": {
+		"url": "https://github.com/sebion7125/pi-protokoll/issues"
+	},
 	"keywords": [
 		"pi-package",
 		"pi-extension",

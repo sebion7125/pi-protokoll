@@ -82,7 +82,7 @@ Chat nach dem Compacting neu zeichnet.
 ## Installation
 
 ```bash
-pi install git:github.com/<user>/pi-protokoll
+pi install git:github.com/sebion7125/pi-protokoll
 ```
 
 oder aus einem lokalen Ordner:

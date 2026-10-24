@@ -77,7 +77,7 @@ compaction.
 ## Install
 
 ```bash
-pi install git:github.com/<user>/pi-protokoll
+pi install git:github.com/sebion7125/pi-protokoll
 ```
 
 or from a local checkout:
