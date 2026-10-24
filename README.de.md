@@ -25,6 +25,8 @@ Gemessen in einer Sitzung mit Qwen3.x an einem lokalen OpenAI-kompatiblen Server
 - die Wiederaufnahme der Sitzung liest etwa 36.000–44.000 Token
 - jeder frühere Zug bleibt über Werkzeuge erreichbar
 
+Praxisbeispiel: [64kdemo](https://github.com/sebion7125/64kdemo), eine prozedurale Waldlandschaft in C und OpenGL, mit Bildern, Kamerafahrt und Entstehungsgeschichte. Die ersten zehn Sitzungen liefen ohne die Erweiterung und endeten immer wieder in Kontextvergiftung; mit der Erweiterung blieb es ab dem Baumsystem eine einzige Sitzung, die oben gemessene.
+
 ## Ablauf
 
 Ein *Zug* ist ein Arbeitslauf: deine Nachricht samt allen Werkzeugrunden bis zur

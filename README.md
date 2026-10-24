@@ -23,6 +23,8 @@ Measured in one session with Qwen3.x on a local OpenAI-compatible server (2× RT
 - resuming the session reads about 36,000–44,000 tokens
 - every earlier turn stays reachable through tools
 
+Practical example: [64kdemo](https://github.com/sebion7125/64kdemo), a procedural forest landscape in C and OpenGL, with screenshots, a camera flight and the story of how it came about. Its first ten sessions ran without the extension and kept ending in context poisoning; with the extension, from the tree system on, it stayed a single session, the one measured above.
+
 ## How it works
 
 A *turn* is one agent run: your message with all tool rounds up to the final answer.
