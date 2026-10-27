@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.2 – 2026-10-28
+
+- Every compaction stores a status entry (`protokoll-compact`): how it ended, the total time, the time of every step of the progress widget and the notification lines. The duration of a compaction is therefore readable after the fact – in the console (the entry renders in the chat) and in web views that show session entries.
+- `/protokoll export` gets the measured time of each compaction in its "Compactings" table.
+
 ## 0.9.1 – 2026-10-24
 
 - When the model ignores the follow-up request for a missing block, the block is written from the turn's transcript right away instead of waiting for the next compaction.

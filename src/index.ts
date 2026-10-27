@@ -30,7 +30,11 @@ import {
 	activeRules,
 	backfillPrompt,
 	buildIndex,
+	COMPACT_ENTRY,
+	type CompactCounts,
+	type CompactEntryData,
 	type CompactionPlan,
+	type CompactStepData,
 	type CutChoice,
 	chooseCut,
 	clip,
@@ -39,6 +43,8 @@ import {
 	collectPins,
 	collectProtocols,
 	collectTurns,
+	compactDuration,
+	compactStatusLine,
 	consolidationPrompt,
 	contentText,
 	currentOpenItems,
@@ -175,6 +181,21 @@ export class Progress {
 	skipRest(): void {
 		for (const s of this.steps) if (s.state === "wait") s.note = "skipped";
 		this.render();
+	}
+
+	/** The run in plain data for the session entry: every step with its own wall time. */
+	summary(): CompactStepData[] {
+		return this.steps.map((s) => ({
+			label: s.label,
+			state: s.state === "wait" ? "skipped" : s.state === "run" ? "fail" : s.state,
+			ms: Math.max(0, (s.ended ?? s.started ?? this.began) - (s.started ?? this.began)),
+			...(s.note ? { note: s.note } : s.state === "run" ? { note: "interrupted" } : {}),
+		}));
+	}
+
+	/** Wall time of the whole run so far. */
+	elapsed(): number {
+		return Math.max(0, Date.now() - this.began);
 	}
 
 	close(): void {
@@ -1070,8 +1091,13 @@ export default function protokoll(pi: ExtensionAPI) {
 		const bar = new Progress(ctx, "protokoll compaction");
 		compactNotes = [];
 		showResult(ctx, undefined);
+		/** What the pass becomes in the session: one entry with the time of every step. */
+		const beganAt = new Date();
+		let outcome: CompactEntryData["outcome"] | undefined;
+		const counts: CompactCounts = {};
 		try {
 			const { preparation } = event;
+			counts.tokensBefore = preparation.tokensBefore;
 			const branch = event.branchEntries as unknown as PlainEntry[];
 			const turns = collectTurns(branch);
 			const window = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow ?? 0;
@@ -1124,6 +1150,15 @@ export default function protokoll(pi: ExtensionAPI) {
 						(a.dropped.length ? ` · limit reached: ${a.dropped.join(", ")}` : ""),
 					a.dropped.length || a.pending ? "warning" : "info",
 				);
+				outcome = "protocol";
+				counts.condensedTurns = a.plan.condensed.length;
+				counts.detailTurns = a.plan.detail.length;
+				counts.missingTurns = a.plan.missingTurns;
+				counts.keptTurns = cand.kept;
+				counts.backfilled = backfilled;
+				counts.newlyFolded = a.newlyFolded;
+				counts.pending = a.pending;
+				counts.dropped = a.dropped;
 				return {
 					compaction: {
 						summary: a.summary,
@@ -1141,9 +1176,12 @@ export default function protokoll(pi: ExtensionAPI) {
 					},
 				};
 			}
+			outcome = "no_room";
 			compactNote(ctx, "protokoll: the summary would not free enough space – Pi summarizes itself", "warning");
 			return;
 		} catch (error) {
+			outcome = "failed";
+			counts.error = error instanceof Error ? error.message : String(error);
 			compactNote(
 				ctx,
 				`protokoll: compaction failed (${error instanceof Error ? error.message : String(error)}) – Pi summarizes itself`,
@@ -1152,6 +1190,17 @@ export default function protokoll(pi: ExtensionAPI) {
 			return;
 		} finally {
 			bar.close();
+			// a pass that never started (no context window, no turns) leaves no entry behind
+			if (outcome)
+				pi.appendEntry<CompactEntryData>(COMPACT_ENTRY, {
+					version: 1,
+					outcome,
+					startedAt: beganAt.toISOString(),
+					durationMs: bar.elapsed(),
+					steps: bar.summary(),
+					notes: [...compactNotes],
+					...counts,
+				});
 		}
 	});
 
@@ -1311,6 +1360,21 @@ export default function protokoll(pi: ExtensionAPI) {
 		add("rule", f.rule);
 		add("revoke", f.revoke);
 		add("note", f.other);
+		return new Text(theme.fg("dim", lines.join("\n")), 1, 0);
+	});
+
+	pi.registerEntryRenderer<CompactEntryData>(COMPACT_ENTRY, (entry, { expanded }, theme) => {
+		const d = entry.data;
+		if (!d) return undefined;
+		const head = `▸ protokoll ${compactStatusLine(d)}`;
+		if (!expanded) return new Text(theme.fg("dim", head.length > 160 ? `${head.slice(0, 157)}…` : head), 1, 0);
+		const lines = [head];
+		for (const s of d.steps)
+			lines.push(
+				`  ${s.state === "ok" ? "✓" : s.state === "fail" ? "✗" : "·"} ${s.label}${s.note ? ` – ${s.note}` : ""} · ${compactDuration(s.ms)}`,
+			);
+		for (const note of d.notes) lines.push(`  ${note}`);
+		if (d.error) lines.push(`  error: ${d.error}`);
 		return new Text(theme.fg("dim", lines.join("\n")), 1, 0);
 	});
 

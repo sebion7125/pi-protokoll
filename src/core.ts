@@ -431,12 +431,76 @@ export const STATE_ENTRY = "protokoll-state";
 export const REBUILD_ENTRY = "protokoll-rebuild";
 /** index/tags written later for a protocol that has none (/protokoll repair). The German name is stored in sessions and stays. */
 export const SUPPLEMENT_ENTRY = "protokoll-ergaenzung";
+/** How the last compaction pass went, with the time of every step. Written by the extension itself. */
+export const COMPACT_ENTRY = "protokoll-compact";
 
 export interface SupplementEntryData {
 	userEntryId: string;
 	turn: number;
 	index: string[];
 	tags: string[];
+}
+
+export interface CompactStepData {
+	label: string;
+	/** wait becomes skipped: the pass ended before this step ran. */
+	state: "ok" | "fail" | "skipped";
+	/** wall time of the step in ms, 0 when it never ran */
+	ms: number;
+	note?: string;
+}
+
+/** What the compaction pass did – the numbers, shared by the entry and the export. */
+export interface CompactCounts {
+	tokensBefore?: number;
+	condensedTurns?: number;
+	detailTurns?: number;
+	keptTurns?: number;
+	missingTurns?: number;
+	backfilled?: number;
+	newlyFolded?: number;
+	pending?: number;
+	dropped?: string[];
+	error?: string;
+}
+
+export interface CompactEntryData extends CompactCounts {
+	version: 1;
+	/** protocol: this extension wrote the summary; no_room or failed: Pi summarizes instead. */
+	outcome: "protocol" | "no_room" | "failed";
+	/** when the pass started and how long it took */
+	startedAt: string;
+	durationMs: number;
+	/** the steps of the progress widget, with their times */
+	steps: CompactStepData[];
+	/** the lines the user saw as notifications during the pass */
+	notes: string[];
+}
+
+/** Seconds and minutes as a user reads them. */
+export function compactDuration(ms: number): string {
+	if (ms < 1000) return `${ms} ms`;
+	if (ms < 10_000) return `${(ms / 1000).toFixed(1)} s`;
+	if (ms < 60_000) return `${Math.round(ms / 1000)} s`;
+	return `${Math.floor(ms / 60_000)} m ${Math.round((ms % 60_000) / 1000)} s`;
+}
+
+/** One line for the console and for /protokoll export: what the pass did and how long it took. */
+export function compactStatusLine(d: CompactEntryData): string {
+	const head = `compaction in ${compactDuration(d.durationMs)}`;
+	if (d.outcome === "no_room") return `${head}: no room – Pi summarizes`;
+	if (d.outcome === "failed") return `${head}: failed – Pi summarizes`;
+	const parts = [
+		`${d.condensedTurns ?? 0} turns condensed`,
+		`${d.detailTurns ?? 0} in detail`,
+		`${d.keptTurns ?? 0} kept in full`,
+	];
+	if (d.missingTurns) parts.push(`${d.missingTurns} without protocol`);
+	if (d.backfilled) parts.push(`${d.backfilled} written afterwards`);
+	if (d.newlyFolded) parts.push(`${d.newlyFolded} newly folded`);
+	if (d.pending) parts.push(`${d.pending} not folded yet`);
+	if (d.dropped?.length) parts.push(`limit reached: ${d.dropped.join(", ")}`);
+	return `${head}: ${parts.join(", ")}`;
 }
 
 /** True when /protokoll rebuild was given after the last compaction written by this extension. */
@@ -1794,21 +1858,29 @@ export function diagnosticAppendix(branch: PlainEntry[], config: ProtocolConfig,
 		"```",
 		"",
 		"## Compactings",
-		"| # | by | tokens before | summary ≈ tokens | first kept turn | detail turns | folded | time |",
-		"|---|---|---|---|---|---|---|---|",
+		"| # | by | took | tokens before | summary ≈ tokens | first kept turn | detail turns | folded | time |",
+		"|---|---|---|---|---|---|---|---|---|",
 	];
 	let n = 0;
+	/** the pass this extension measured last, matched to the compaction entry it produced */
+	let lastCompact: CompactEntryData | undefined;
 	for (const e of branch) {
+		if (e.type === "custom" && e.customType === COMPACT_ENTRY && e.data && typeof e.data === "object") {
+			lastCompact = e.data as CompactEntryData;
+			continue;
+		}
 		if (e.type !== "compaction") continue;
 		n++;
 		const own = isOwnCompaction(e);
 		const d = (e.details ?? {}) as { status?: FoldState; detailTurns?: number };
 		const kept = turnOfEntry.get(String(e.firstKeptEntryId ?? ""));
+		const took = lastCompact ? compactDuration(lastCompact.durationMs) : "";
+		lastCompact = undefined;
 		out.push(
-			`| ${n} | ${own ? "protokoll" : "Pi"} | ${e.tokensBefore ?? "?"} | ${tok(String(e.summary ?? ""))} | ${kept ? `T${kept}` : "?"} | ${d.detailTurns ?? ""} | ${d.status?.folded ?? ""} | ${e.timestamp ?? ""} |`,
+			`| ${n} | ${own ? "protokoll" : "Pi"} | ${took} | ${e.tokensBefore ?? "?"} | ${tok(String(e.summary ?? ""))} | ${kept ? `T${kept}` : "?"} | ${d.detailTurns ?? ""} | ${d.status?.folded ?? ""} | ${e.timestamp ?? ""} |`,
 		);
 	}
-	if (!n) out.push("| – | none | | | | | | |");
+	if (!n) out.push("| – | none | | | | | | | |");
 	const state = latestFoldState(branch, branch.length);
 	out.push("", "## Stored state of the last own compaction");
 	out.push(`Rebuild requested for the next compaction: ${rebuildPending ? "yes" : "no"}`);

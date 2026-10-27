@@ -6,7 +6,15 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { collectProtocols, collectTurns, type PlainEntry, type ProtocolEntryData, tok } from "../src/core.ts";
+import {
+	COMPACT_ENTRY,
+	type CompactEntryData,
+	collectProtocols,
+	collectTurns,
+	type PlainEntry,
+	type ProtocolEntryData,
+	tok,
+} from "../src/core.ts";
 import protokoll, { forceThinkingLevel, Progress } from "../src/index.ts";
 
 type Handler = (event: any, ctx: any) => any;
@@ -502,6 +510,93 @@ describe("protokoll extension", () => {
 		expect(shown.some((l) => l.startsWith("protokoll compaction"))).toBe(true);
 		expect(shown.some((l) => l.includes("✓ turn 2: write missing protocol"))).toBe(true);
 		expect(h.widgets.at(-1)).toBeUndefined();
+	});
+
+	it("stores what the compaction did and how long each step took", async () => {
+		h = harness(["<protocol>\nresult: turn two from transcript\n</protocol>"], {
+			consolidate: false,
+			keepRecentTurns: 1,
+		});
+		await h.fire("session_start", { reason: "startup" });
+		h.ctx.hasUI = true;
+		await h.turn("q1", "a1\n<protocol>result: r1</protocol>");
+		interrupted(h, "q2");
+		await h.turn("q3", "a3\n<protocol>result: r3</protocol>");
+		const r = await h.fire("session_before_compact", {
+			preparation: {
+				firstKeptEntryId: h.branch.filter((e) => e.message?.role === "user").at(-1)!.id,
+				isSplitTurn: false,
+				tokensBefore: 9000,
+				settings: { reserveTokens: 1000 },
+			},
+			branchEntries: [...h.branch],
+			reason: "threshold",
+			signal: new AbortController().signal,
+		});
+		const stored = h.branch.filter((e) => e.customType === COMPACT_ENTRY);
+		expect(stored.length).toBe(1);
+		const d = stored[0].data as CompactEntryData;
+		expect(d.version).toBe(1);
+		expect(d.outcome).toBe("protocol");
+		expect(d.tokensBefore).toBe(9000);
+		// the entry says the same as the compaction it produced
+		const wrote = r.compaction.details as {
+			condensedTurns: number;
+			detailTurns: number;
+			keptTurns: number;
+			missingTurns: number;
+		};
+		expect(wrote.condensedTurns).toBeGreaterThan(0);
+		expect(d.condensedTurns).toBe(wrote.condensedTurns);
+		expect(d.detailTurns).toBe(wrote.detailTurns);
+		expect(d.keptTurns).toBe(wrote.keptTurns);
+		expect(d.missingTurns).toBe(wrote.missingTurns);
+		expect(d.backfilled).toBe(1);
+		expect(d.startedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+		expect(d.durationMs).toBeGreaterThanOrEqual(0);
+		// every step of the widget survives, with its own time
+		const step = d.steps.find((s) => s.label === "turn 2: write missing protocol");
+		expect(step?.state).toBe("ok");
+		expect(step?.ms).toBeGreaterThanOrEqual(0);
+		expect(d.notes.some((n) => n.includes("turns condensed"))).toBe(true);
+	});
+
+	it("stores the failed pass when Pi has to summarize itself", async () => {
+		h = harness([], { consolidate: false, statusMaxTokens: 5000 });
+		await h.fire("session_start", { reason: "startup" });
+		for (let i = 1; i <= 4; i++) await h.turn(`q${i}`, `a${i}\n<protocol>result: r${i}</protocol>`);
+		const r = await h.fire("session_before_compact", {
+			preparation: {
+				firstKeptEntryId: h.branch.at(-3)!.id,
+				isSplitTurn: false,
+				tokensBefore: 9000,
+				settings: { reserveTokens: 1000 },
+			},
+			branchEntries: [...h.branch],
+			reason: "threshold",
+			signal: new AbortController().signal,
+		});
+		expect(r).toBeUndefined();
+		const d = h.branch.find((e) => e.customType === COMPACT_ENTRY)?.data as CompactEntryData;
+		expect(d.outcome).toBe("no_room");
+		expect(d.notes.some((n) => n.includes("Pi summarizes itself"))).toBe(true);
+		expect(d.steps.length).toBe(0);
+	});
+
+	it("leaves no status entry when the pass never started", async () => {
+		await h.turn("q", "a\n<protocol>result: x</protocol>");
+		await h.fire("session_before_compact", {
+			preparation: {
+				firstKeptEntryId: "x",
+				isSplitTurn: false,
+				tokensBefore: 9000,
+				settings: { reserveTokens: 1000 },
+			},
+			branchEntries: [],
+			reason: "threshold",
+			signal: new AbortController().signal,
+		});
+		expect(h.branch.some((e) => e.customType === COMPACT_ENTRY)).toBe(false);
 	});
 
 	it("stores the protocol of an aborted last turn when compaction cuts inside it", async () => {

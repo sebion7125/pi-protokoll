@@ -82,6 +82,11 @@ Während des Compactings und der Nachträge zeigt ein Widget über dem Eingabefe
 Fortschritt. Danach zeigt es die neue Kontextgröße, bis zur nächsten Nachricht, weil Pi den
 Chat nach dem Compacting neu zeichnet.
 
+Jedes Compacting speichert zusätzlich einen eigenen Status-Eintrag (`protokoll-compact`): wie
+es ausgegangen ist, die Gesamtzeit, die Zeit jedes Schritts und die Meldungszeilen des Ablaufs. Die Dauer ist damit auch lange nach dem Widget noch lesbar – in der Konsole und überall,
+wo Session-Einträge dargestellt werden, zum Beispiel im Browser. `/protokoll export` listet die
+Zeit jedes Compactings.
+
 ## Installation
 
 ```bash

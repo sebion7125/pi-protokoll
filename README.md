@@ -77,6 +77,12 @@ Progress is shown above the editor during compaction and backfills. Afterwards a
 the new context size; it stays until the next message, because Pi redraws the chat after
 compaction.
 
+Every compaction additionally stores its own status entry (`protokoll-compact`): how it ended,
+how long it took in total, the time of every step and the notification lines of the pass. The
+duration is therefore readable long after the widget is gone – in the console and in anything
+that renders session entries, a web view for example. `/protokoll export` lists the time of
+every compaction.
+
 ## Install
 
 ```bash

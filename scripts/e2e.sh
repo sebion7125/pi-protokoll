@@ -34,6 +34,8 @@ for i in $(seq 2 9); do run --continue "question $i $filler"; done
 
 session="$(ls -t "$TMP"/agent/sessions/*/*.jsonl | head -1)"
 grep -q '"customType":"protokoll"' "$session" || { echo "FAIL: no protocol entries" >&2; exit 1; }
+grep -q '"customType":"protokoll-compact"' "$session" || { echo "FAIL: no compaction status entry" >&2; exit 1; }
+grep -q '"durationMs":[0-9]' "$session" || { echo "FAIL: compaction status without a duration" >&2; exit 1; }
 own="$(grep -c '"protokoll":true' "$session" || true)"
 [[ "$own" -ge 1 ]] || { echo "FAIL: no compaction written by the extension" >&2; exit 1; }
 grep -q "session_protocol" "$TMP/requests.log" || { echo "FAIL: system prompt section missing" >&2; exit 1; }

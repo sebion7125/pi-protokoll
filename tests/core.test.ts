@@ -5,14 +5,19 @@ import { describe, expect, it } from "vitest";
 import {
 	activeRules,
 	buildIndex,
+	COMPACT_ENTRY,
+	type CompactEntryData,
 	chooseCut,
 	cleanFileEntry,
 	clipMiddle,
 	collectProtocols,
 	collectTurns,
+	compactDuration,
+	compactStatusLine,
 	currentOpenItems,
 	DEFAULT_CONFIG,
 	decodeRanges,
+	diagnosticAppendix,
 	encodeRanges,
 	extractBlock,
 	type FoldState,
@@ -827,5 +832,56 @@ describe("index of older turns", () => {
 		expect(f?.index).toEqual(["palette wald chosen"]);
 		expect(f?.tags).toEqual(["Blattfarbe, DEMO_LEAFPAL"]);
 		expect(systemPromptSection(DEFAULT_CONFIG)).toContain("tags: 3-6 search terms");
+	});
+
+	it("reads durations the way a user counts them", () => {
+		expect(compactDuration(900)).toBe("900 ms");
+		expect(compactDuration(4500)).toBe("4.5 s");
+		expect(compactDuration(45_000)).toBe("45 s");
+		expect(compactDuration(125_000)).toBe("2 m 5 s");
+	});
+
+	it("describes a stored compaction in one line", () => {
+		const base = {
+			version: 1 as const,
+			outcome: "protocol" as const,
+			startedAt: "2026-10-28T10:00:00.000Z",
+			durationMs: 65_000,
+			steps: [],
+			notes: [],
+		};
+		expect(compactStatusLine({ ...base, condensedTurns: 4, detailTurns: 2, keptTurns: 3 })).toBe(
+			"compaction in 1 m 5 s: 4 turns condensed, 2 in detail, 3 kept in full",
+		);
+		expect(compactStatusLine({ ...base, condensedTurns: 4, detailTurns: 2, keptTurns: 3, pending: 2 })).toContain(
+			", 2 not folded yet",
+		);
+		expect(compactStatusLine({ ...base, outcome: "no_room" })).toBe("compaction in 1 m 5 s: no room – Pi summarizes");
+		expect(compactStatusLine({ ...base, outcome: "failed" })).toBe("compaction in 1 m 5 s: failed – Pi summarizes");
+	});
+
+	it("shows the measured time of a compaction in the export", () => {
+		const status: CompactEntryData = {
+			version: 1,
+			outcome: "protocol",
+			startedAt: "2026-10-28T10:00:00.000Z",
+			durationMs: 45_000,
+			steps: [{ label: "turn 2: write missing protocol", state: "ok", ms: 1200 }],
+			notes: [],
+		};
+		const branch: PlainEntry[] = [
+			{ id: "u1", type: "message", message: { role: "user", content: "question" } },
+			{ id: "s1", type: "custom", customType: COMPACT_ENTRY, data: status },
+			{
+				id: "k1",
+				type: "compaction",
+				summary: "S",
+				firstKeptEntryId: "u1",
+				tokensBefore: 900,
+				details: { protokoll: true, version: 3, detailTurns: 1 },
+			},
+		];
+		const out = diagnosticAppendix(branch, DEFAULT_CONFIG, false);
+		expect(out).toContain("| 1 | protokoll | 45 s | 900 |");
 	});
 });
