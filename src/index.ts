@@ -267,6 +267,7 @@ export class Progress {
 		if (!this.report) return;
 		const done = this.steps.filter((s) => s.state === "ok" || s.state === "fail").length;
 		const current = this.steps.find((s) => s.state === "run") ?? this.steps.find((s) => s.state === "wait");
+		const now = Date.now();
 		this.report({
 			version: 1,
 			session: this.ctx.sessionManager.getSessionId(),
@@ -276,6 +277,18 @@ export class Progress {
 			label: current?.label ?? "",
 			state: current?.state ?? (this.steps.length > 0 && done >= this.steps.length ? "ok" : "wait"),
 			ms: this.elapsed(),
+			// every step as the console shows it: state, own time, what the model has sent so far
+			lines: this.steps.map((s) => ({
+				label: s.label,
+				state: s.state,
+				ms:
+					s.started === undefined && s.ended === undefined
+						? null
+						: Math.max(0, (s.ended ?? now) - (s.started ?? this.began)),
+				chars: s.chars,
+				thinking: s.thinking,
+				...(s.note ? { note: s.note } : {}),
+			})),
 			closed: this.closed,
 		});
 	}

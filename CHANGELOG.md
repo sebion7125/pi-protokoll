@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.4 – 2026-10-29
+
+- The bus report of a running pass now carries every step, not only the current one: state, the step's own time, how many characters the model has sent and whether it is thinking or writing. A web view shows the same status the console widget shows.
+
 ## 0.9.3 – 2026-10-29
 
 - While a compaction (or backfill) pass runs, every step is published on Pi's shared extension bus (`pi.events`, channel `pi-protokoll:progress`) with its label, state and the elapsed time. pi-webapp shows these lines in the browser. Nothing is stored from them: the single `protokoll-compact` entry per pass stays the record.

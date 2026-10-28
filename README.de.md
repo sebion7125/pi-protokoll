@@ -89,8 +89,10 @@ Zeit jedes Compactings.
 
 Während ein Durchlauf läuft, wird jeder Schritt zusätzlich über Pi's gemeinsamen Extensions-Bus
 (Kanal `pi-protokoll:progress`, siehe `ProgressEvent` in `src/core.ts`) gemeldet, damit eine andere
-Extension die laufenden Schritte live zeigen kann. Diese Zeilen werden nie in der Session
-abgelegt – der Status-Eintrag pro Durchlauf bleibt das Protokoll.
+Extension die laufenden Schritte live zeigen kann. Jede Meldung trägt den ganzen Durchlauf: pro
+Schritt der Zustand, die eigene Zeit, wie viele Zeichen das Modell schon geschrieben hat und ob es
+denkt oder schreibt – derselbe Status, den das Widget in der Konsole zeigt. Diese Zeilen werden nie
+in der Session abgelegt – der Status-Eintrag pro Durchlauf bleibt das Protokoll.
 
 ## Installation
 

@@ -557,6 +557,7 @@ describe("protokoll extension", () => {
 		expect(d.tokensBefore).toBe(9000);
 		// the live lines cover exactly the steps the entry stores
 		expect(Math.max(...lines.map((l) => (l.data as ProgressEvent).steps))).toBe(d.steps.length);
+		expect((lines.at(-1)!.data as ProgressEvent).lines.map((l) => l.label)).toEqual(d.steps.map((s) => s.label));
 		// the entry says the same as the compaction it produced
 		const wrote = r.compaction.details as {
 			condensedTurns: number;
@@ -883,11 +884,29 @@ describe("protokoll extension", () => {
 			state: "run",
 			closed: false,
 		});
+		// what the console widget shows while a step runs reaches the listener too
+		expect(lines.at(-1)!.lines).toEqual([
+			{ label: "fold older turns", state: "run", ms: expect.any(Number), chars: 0, thinking: false },
+		]);
+		bar.update(first, 1200, true);
+		expect(lines.at(-1)!.lines).toEqual([
+			{ label: "fold older turns", state: "run", ms: expect.any(Number), chars: 1200, thinking: true },
+		]);
 		bar.finish(first, true);
+		expect(lines.at(-1)!.lines).toEqual([
+			{ label: "fold older turns", state: "ok", ms: expect.any(Number), chars: 1200, thinking: true },
+		]);
 		expect(lines.at(-1)).toMatchObject({ state: "ok", label: "", closed: false });
+		// a step that ends without having started still reports a time, one that never ran reports none
+		const second = bar.add("write the summary");
+		bar.finish(second, false, "interrupted");
+		expect(lines.at(-1)!.lines[1]).toMatchObject({ label: "write the summary", state: "fail", note: "interrupted" });
+		expect(lines.at(-1)!.lines[1]!.ms).toBeGreaterThanOrEqual(0);
+		bar.add("report");
+		expect(lines.at(-1)!.lines[2]).toMatchObject({ label: "report", state: "wait", ms: null });
 		bar.close();
 		expect(lines.at(-1)).toMatchObject({ closed: true });
-		expect(lines.every((l) => l.ms >= 0 && l.steps === 1)).toBe(true);
+		expect(lines.every((l) => l.ms >= 0)).toBe(true);
 	});
 
 	it("appends a diagnostic part to /protokoll export", async () => {

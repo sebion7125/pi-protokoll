@@ -499,8 +499,23 @@ export interface ProgressStep {
 	state: "wait" | "run" | "ok" | "fail";
 	/** wall time of the whole run so far */
 	ms: number;
+	/** every step of the run, in order, exactly as the console widget shows them */
+	lines: ProgressStepLine[];
 	/** last line of the run: the durable entry follows right after it */
 	closed: boolean;
+}
+
+/** One step of a running pass: how far the model is, and how long the step already took. */
+export interface ProgressStepLine {
+	label: string;
+	state: "wait" | "run" | "ok" | "fail";
+	/** wall time of this step so far, null while it has not started */
+	ms: number | null;
+	/** characters the model has sent for this step so far, thinking included */
+	chars: number;
+	/** true while those characters are thinking instead of answer text */
+	thinking: boolean;
+	note?: string;
 }
 
 export interface ProgressEvent extends ProgressStep {

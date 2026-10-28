@@ -85,7 +85,9 @@ every compaction.
 
 While a pass runs, every step is also published on Pi's shared extension bus (channel
 `pi-protokoll:progress`, see `ProgressEvent` in `src/core.ts`), so another extension can show the
-running steps live. Those lines are never stored in the session — one status entry per pass stays
+running steps live. Each report carries the whole run: for every step its state, its own time, how
+many characters the model has sent and whether it is thinking or writing — the same status the
+console widget shows. Those lines are never stored in the session — one status entry per pass stays
 the record.
 
 ## Install
