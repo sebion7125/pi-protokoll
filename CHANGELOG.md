@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.3 – 2026-10-29
+
+- While a compaction (or backfill) pass runs, every step is published on Pi's shared extension bus (`pi.events`, channel `pi-protokoll:progress`) with its label, state and the elapsed time. pi-webapp shows these lines in the browser. Nothing is stored from them: the single `protokoll-compact` entry per pass stays the record.
+
 ## 0.9.2 – 2026-10-28
 
 - Every compaction stores a status entry (`protokoll-compact`): how it ended, the total time, the time of every step of the progress widget and the notification lines. The duration of a compaction is therefore readable after the fact – in the console (the entry renders in the chat) and in web views that show session entries.

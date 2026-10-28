@@ -66,8 +66,11 @@ import {
 	PIN_ENTRY,
 	type PinEntryData,
 	type PlainEntry,
+	PROGRESS_CHANNEL,
 	PROGRESS_PROMPT,
 	PROTOCOL_ENTRY,
+	type ProgressEvent,
+	type ProgressStep,
 	type ProtocolConfig,
 	type ProtocolEntryData,
 	type ProtocolFields,
@@ -132,9 +135,13 @@ export class Progress {
 	private readonly began = Date.now();
 	private readonly ctx: ExtensionContext;
 	private readonly title: string;
-	constructor(ctx: ExtensionContext, title: string) {
+	/** live line for other extensions (pi-webapp shows it in the browser); nothing is persisted */
+	private readonly report?: (line: ProgressStep) => void;
+	private closed = false;
+	constructor(ctx: ExtensionContext, title: string, report?: (line: ProgressStep) => void) {
 		this.ctx = ctx;
 		this.title = title;
+		this.report = report;
 	}
 
 	private get visible(): boolean {
@@ -156,7 +163,7 @@ export class Progress {
 		step.state = "run";
 		step.started = Date.now();
 		step.chars = 0;
-		if (!this.timer && this.visible) {
+		if (!this.timer && (this.visible || this.report)) {
 			this.timer = setInterval(() => this.render(), 1000);
 			this.timer.unref?.();
 		}
@@ -202,6 +209,10 @@ export class Progress {
 		if (this.timer) clearInterval(this.timer);
 		this.timer = undefined;
 		if (this.visible) this.ctx.ui.setWidget(STATUS_KEY, undefined);
+		if (!this.closed) {
+			this.closed = true;
+			this.publish();
+		}
 	}
 
 	lines(): string[] {
@@ -248,6 +259,25 @@ export class Progress {
 
 	render(): void {
 		if (this.visible) this.ctx.ui.setWidget(STATUS_KEY, this.lines());
+		this.publish();
+	}
+
+	/** Current step as plain data for the shared bus. Runs without a console UI too. */
+	private publish(): void {
+		if (!this.report) return;
+		const done = this.steps.filter((s) => s.state === "ok" || s.state === "fail").length;
+		const current = this.steps.find((s) => s.state === "run") ?? this.steps.find((s) => s.state === "wait");
+		this.report({
+			version: 1,
+			session: this.ctx.sessionManager.getSessionId(),
+			title: this.title,
+			step: Math.min(done + 1, this.steps.length),
+			steps: this.steps.length,
+			label: current?.label ?? "",
+			state: current?.state ?? (this.steps.length > 0 && done >= this.steps.length ? "ok" : "wait"),
+			ms: this.elapsed(),
+			closed: this.closed,
+		});
 	}
 }
 
@@ -1088,7 +1118,9 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (!enabled || config.compaction !== "protocol") return;
-		const bar = new Progress(ctx, "protokoll compaction");
+		const bar = new Progress(ctx, "protokoll compaction", (line) =>
+			pi.events.emit(PROGRESS_CHANNEL, { ...line, run: "compaction" } satisfies ProgressEvent),
+		);
 		compactNotes = [];
 		showResult(ctx, undefined);
 		/** What the pass becomes in the session: one entry with the time of every step. */

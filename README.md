@@ -83,6 +83,11 @@ duration is therefore readable long after the widget is gone – in the console 
 that renders session entries, a web view for example. `/protokoll export` lists the time of
 every compaction.
 
+While a pass runs, every step is also published on Pi's shared extension bus (channel
+`pi-protokoll:progress`, see `ProgressEvent` in `src/core.ts`), so another extension can show the
+running steps live. Those lines are never stored in the session — one status entry per pass stays
+the record.
+
 ## Install
 
 ```bash

@@ -477,6 +477,37 @@ export interface CompactEntryData extends CompactCounts {
 	notes: string[];
 }
 
+/**
+ * Live line of a running pass on the shared extension bus (`pi.events`). Nothing is stored in the
+ * session here: the durable record stays the single COMPACT_ENTRY above. pi-webapp shows these
+ * lines in the browser, the console shows them as its widget.
+ */
+export const PROGRESS_CHANNEL = "pi-protokoll:progress";
+
+export interface ProgressStep {
+	version: 1;
+	/** session of the run, so a listener can ignore other sessions */
+	session: string;
+	/** heading of the progress bar as the user sees it */
+	title: string;
+	/** 1-based index of the current step */
+	step: number;
+	/** total number of steps of the run */
+	steps: number;
+	/** label of the current step */
+	label: string;
+	state: "wait" | "run" | "ok" | "fail";
+	/** wall time of the whole run so far */
+	ms: number;
+	/** last line of the run: the durable entry follows right after it */
+	closed: boolean;
+}
+
+export interface ProgressEvent extends ProgressStep {
+	/** which kind of run reports: compaction, repair, ... */
+	run: string;
+}
+
 /** Seconds and minutes as a user reads them. */
 export function compactDuration(ms: number): string {
 	if (ms < 1000) return `${ms} ms`;

@@ -87,6 +87,11 @@ es ausgegangen ist, die Gesamtzeit, die Zeit jedes Schritts und die Meldungszeil
 wo Session-Einträge dargestellt werden, zum Beispiel im Browser. `/protokoll export` listet die
 Zeit jedes Compactings.
 
+Während ein Durchlauf läuft, wird jeder Schritt zusätzlich über Pi's gemeinsamen Extensions-Bus
+(Kanal `pi-protokoll:progress`, siehe `ProgressEvent` in `src/core.ts`) gemeldet, damit eine andere
+Extension die laufenden Schritte live zeigen kann. Diese Zeilen werden nie in der Session
+abgelegt – der Status-Eintrag pro Durchlauf bleibt das Protokoll.
+
 ## Installation
 
 ```bash

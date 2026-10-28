@@ -12,6 +12,8 @@ import {
 	collectProtocols,
 	collectTurns,
 	type PlainEntry,
+	PROGRESS_CHANNEL,
+	type ProgressEvent,
 	type ProtocolEntryData,
 	tok,
 } from "../src/core.ts";
@@ -34,10 +36,16 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 	const notes: string[] = [];
 	const requests: any[] = [];
 	const widgets: (string[] | undefined)[] = [];
+	/** what the extension puts on the shared bus while a run is going */
+	const bus: { channel: string; data: any }[] = [];
 	let seq = 0;
 
 	const pi: any = {
 		on: (name: string, h: Handler) => handlers.set(name, [...(handlers.get(name) ?? []), h]),
+		events: {
+			emit: (channel: string, data: unknown) => bus.push({ channel, data }),
+			on: () => () => {},
+		},
 		registerTool: (t: any) => tools.set(t.name, t),
 		registerCommand: (n: string, c: any) => commands.set(n, c),
 		registerMarkdownTransformer: () => {},
@@ -130,6 +138,7 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 		ctx,
 		fire,
 		branch,
+		bus,
 		tools,
 		commands,
 		notes,
@@ -533,12 +542,21 @@ describe("protokoll extension", () => {
 			reason: "threshold",
 			signal: new AbortController().signal,
 		});
+		// the pass talks to other extensions over the bus, without storing those lines
+		const lines = h.bus.filter((e) => e.channel === PROGRESS_CHANNEL);
+		expect(lines.length).toBeGreaterThan(1);
+		expect(lines.every((l) => (l.data as ProgressEvent).run === "compaction")).toBe(true);
+		expect(lines.every((l) => (l.data as ProgressEvent).session === "s1")).toBe(true);
+		expect(lines.some((l) => (l.data as ProgressEvent).state === "run")).toBe(true);
+		expect((lines.at(-1)!.data as ProgressEvent).closed).toBe(true);
 		const stored = h.branch.filter((e) => e.customType === COMPACT_ENTRY);
 		expect(stored.length).toBe(1);
 		const d = stored[0].data as CompactEntryData;
 		expect(d.version).toBe(1);
 		expect(d.outcome).toBe("protocol");
 		expect(d.tokensBefore).toBe(9000);
+		// the live lines cover exactly the steps the entry stores
+		expect(Math.max(...lines.map((l) => (l.data as ProgressEvent).steps))).toBe(d.steps.length);
 		// the entry says the same as the compaction it produced
 		const wrote = r.compaction.details as {
 			condensedTurns: number;
@@ -846,6 +864,30 @@ describe("protokoll extension", () => {
 		expect(lines.some((l) => l.includes("▸ step 13"))).toBe(true);
 		expect(lines.at(-1)).toContain("more");
 		bar.close();
+	});
+
+	it("reports every step on the shared bus and closes the run", () => {
+		const lines: ProgressEvent[] = [];
+		const bar = new Progress({ hasUI: false, sessionManager: { getSessionId: () => "s9" } } as any, "T", (line) =>
+			lines.push({ ...line, run: "compaction" }),
+		);
+		const first = bar.add("fold older turns");
+		bar.start(first);
+		expect(lines.at(-1)).toMatchObject({
+			version: 1,
+			session: "s9",
+			title: "T",
+			step: 1,
+			steps: 1,
+			label: "fold older turns",
+			state: "run",
+			closed: false,
+		});
+		bar.finish(first, true);
+		expect(lines.at(-1)).toMatchObject({ state: "ok", label: "", closed: false });
+		bar.close();
+		expect(lines.at(-1)).toMatchObject({ closed: true });
+		expect(lines.every((l) => l.ms >= 0 && l.steps === 1)).toBe(true);
 	});
 
 	it("appends a diagnostic part to /protokoll export", async () => {
