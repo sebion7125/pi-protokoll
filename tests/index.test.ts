@@ -33,6 +33,8 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 	const commands = new Map<string, any>();
 	let activeTools = ["read", "bash"];
 	const branch: PlainEntry[] = [];
+	/** models the registry can find by "provider/id", besides the session model */
+	const models: Record<string, unknown>[] = [{ id: "m", provider: "test", contextWindow: 10_000 }];
 	const notes: string[] = [];
 	const requests: any[] = [];
 	const widgets: (string[] | undefined)[] = [];
@@ -78,11 +80,12 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 				],
 			}),
 		},
-		model: { id: "m", contextWindow: 10_000 },
+		model: { id: "m", provider: "test", contextWindow: 10_000 },
 		getContextUsage: () => ({ contextWindow: 10_000, tokens: 0, percent: 0 }),
 		modelRegistry: {
-			streamSimple: (_model: unknown, context: any, options: any) => {
-				requests.push({ context, options });
+			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+			streamSimple: (model: unknown, context: any, options: any) => {
+				requests.push({ model, context, options });
 				const text = modelAnswers.shift() ?? "";
 				return {
 					result: async () => ({ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }),
@@ -139,6 +142,7 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 		fire,
 		branch,
 		bus,
+		models,
 		tools,
 		commands,
 		notes,
@@ -921,6 +925,127 @@ describe("protokoll extension", () => {
 		expect(text).toMatch(/\| 1 \| inline \| own \| stop \| 1 \| 0 \| nebel bitte \|/);
 		expect(text).toContain("tags: fog, Nebel");
 		expect(text).toContain('"maxWords"');
+	});
+
+	it("keeps using the session model when no auxiliaryModel is set", async () => {
+		h = harness(["<protocol>\nresult: later\n</protocol>"]);
+		await h.fire("session_start", { reason: "startup" });
+		const { draft } = await h.turn("q", "answer without block");
+		expect(draft?.source).toBe("followup");
+		expect((h.requests[0].model as { id: string }).id).toBe("m");
+	});
+
+	it("sends every own request to the configured auxiliaryModel", async () => {
+		h = harness(["<protocol>\nresult: from aux\n</protocol>"], { auxiliaryModel: "openai/mini" });
+		await h.fire("session_start", { reason: "startup" });
+		h.models.push({ id: "mini", provider: "openai", contextWindow: 30_000 });
+		const { draft } = await h.turn("q", "answer without block");
+		expect(draft?.source).toBe("followup");
+		expect((h.requests[0].model as { id: string }).id).toBe("mini");
+		// the other model has no chat cache to protect: its own thinking level is used, not the chat's
+		expect(h.requests[0].options.reasoning).toBeUndefined();
+		expect(h.requests[0].options.onPayload).toBeInstanceOf(Function);
+	});
+
+	it("never asks Cursor directly and says why, once per session", async () => {
+		h = harness([]);
+		await h.fire("session_start", { reason: "startup" });
+		h.ctx.model = { id: "cursor-model", provider: "cursor", api: "cursor-sdk", contextWindow: 10_000 };
+		const one = await h.turn("q1", "first answer");
+		const two = await h.turn("q2", "second answer");
+		expect(one.draft?.source).toBe("missing");
+		expect(two.draft?.source).toBe("missing");
+		expect(h.requests.length).toBe(0);
+		const notices = h.notes.filter((n) => n.includes("auxiliaryModel"));
+		expect(notices.length).toBe(1);
+		expect(notices[0]).toContain("unavailable with Cursor");
+	});
+
+	it("writes the protocol through a non-Cursor auxiliaryModel while the chat runs on Cursor", async () => {
+		h = harness(["<protocol>\nresult: from aux model\n</protocol>"], { auxiliaryModel: "openai/mini" });
+		await h.fire("session_start", { reason: "startup" });
+		h.ctx.model = { id: "cursor-model", provider: "cursor", api: "cursor-sdk", contextWindow: 10_000 };
+		h.models.push({ id: "mini", provider: "openai", contextWindow: 30_000 });
+		const { draft } = await h.turn("q", "answer without block");
+		expect(draft?.source).toBe("followup");
+		expect(draft?.fields?.result).toEqual(["from aux model"]);
+		expect((h.requests[0].model as { id: string }).id).toBe("mini");
+		expect(h.notes.some((n) => n.includes("auxiliaryModel"))).toBe(false);
+	});
+
+	it("blocks a Cursor auxiliaryModel the same way", async () => {
+		h = harness([], { auxiliaryModel: "cursor/cheap" });
+		await h.fire("session_start", { reason: "startup" });
+		h.models.push({ id: "cheap", provider: "cursor", api: "cursor-sdk", contextWindow: 30_000 });
+		const { draft } = await h.turn("q", "answer");
+		expect(draft?.source).toBe("missing");
+		expect(h.requests.length).toBe(0);
+		expect(h.notes.filter((n) => n.includes("Cursor")).length).toBe(1);
+	});
+
+	it("skips an unknown auxiliaryModel instead of falling back to the session model", async () => {
+		h = harness(["<protocol>\nresult: should not happen\n</protocol>"], { auxiliaryModel: "openai/not-registered" });
+		await h.fire("session_start", { reason: "startup" });
+		const { draft } = await h.turn("q", "answer");
+		expect(draft?.source).toBe("missing");
+		expect(h.requests.length).toBe(0);
+		const notices = h.notes.filter((n) => n.includes("openai/not-registered"));
+		expect(notices.length).toBe(1);
+	});
+
+	it("still reads and strips an inline block when the chat model is Cursor", async () => {
+		h = harness([]);
+		await h.fire("session_start", { reason: "startup" });
+		h.ctx.model = { id: "cursor-model", provider: "cursor", api: "cursor-sdk", contextWindow: 10_000 };
+		const { message, draft } = await h.turn("q", "Built.\n<protocol>\nresult: built\n</protocol>");
+		expect(draft?.source).toBe("inline");
+		expect(draft?.fields?.result).toEqual(["built"]);
+		expect(message.content[0].text).toBe("Built.");
+		expect(h.requests.length).toBe(0);
+	});
+
+	it("uses the same auxiliaryModel for the backfill during compaction", async () => {
+		h = harness(["<protocol>\nresult: turn two from transcript\n</protocol>"], {
+			consolidate: false,
+			keepRecentTurns: 1,
+			auxiliaryModel: "openai/mini",
+		});
+		await h.fire("session_start", { reason: "startup" });
+		h.models.push({ id: "mini", provider: "openai", contextWindow: 30_000 });
+		await h.turn("q1", "a1\n<protocol>result: r1</protocol>");
+		interrupted(h, "q2");
+		await h.turn("q3", "a3\n<protocol>result: r3</protocol>");
+		const askedBefore = h.requests.length;
+		const r = await h.fire("session_before_compact", {
+			preparation: {
+				firstKeptEntryId: h.branch.filter((e) => e.message?.role === "user").at(-1)!.id,
+				isSplitTurn: false,
+				tokensBefore: 9000,
+				settings: { reserveTokens: 1000 },
+			},
+			branchEntries: [...h.branch],
+			reason: "threshold",
+			signal: new AbortController().signal,
+		});
+		expect(r.compaction).toBeDefined();
+		expect(h.requests.length).toBeGreaterThan(askedBefore);
+		expect(h.requests.map((q) => (q.model as { id: string }).id)).toEqual(
+			Array.from({ length: h.requests.length }, () => "mini"),
+		);
+	});
+
+	it("picks up auxiliaryModel on /protokoll reload", async () => {
+		h = harness(["<protocol>\nresult: after reload\n</protocol>"]);
+		await h.fire("session_start", { reason: "startup" });
+		h.models.push({ id: "mini", provider: "openai", contextWindow: 30_000 });
+		writeFileSync(
+			join(process.env.PI_CODING_AGENT_DIR ?? ".", "protokoll.json"),
+			JSON.stringify({ auxiliaryModel: "openai/mini" }),
+		);
+		await h.commands.get("protokoll").handler("reload", h.ctx);
+		const { draft } = await h.turn("q", "answer without block");
+		expect(draft?.source).toBe("followup");
+		expect((h.requests[0].model as { id: string }).id).toBe("mini");
 	});
 
 	it("returns full protocols with protocol_read", async () => {

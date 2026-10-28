@@ -60,6 +60,7 @@ import {
 	hideBlocks,
 	INTERRUPTED_PROMPT,
 	isNoneItem,
+	isUnsupportedModelCall,
 	latestFoldState,
 	loadConfig,
 	narrativeBudget,
@@ -76,6 +77,7 @@ import {
 	type ProtocolFields,
 	parseBlock,
 	parseConsolidation,
+	parseModelRef,
 	parseSupplement,
 	planCompaction,
 	protocolsWith,
@@ -303,6 +305,8 @@ interface ModelReply {
 	toolCall?: boolean;
 	/** The whole assistant message (to continue the exchange after a misplaced tool call). */
 	message?: { content?: unknown };
+	/** True when the provider cannot serve this kind of request at all (Cursor), so the caller must not retry another way. */
+	unsupportedProvider?: boolean;
 }
 
 /** Why a reply carried no usable block, in words for the user. */
@@ -316,15 +320,81 @@ function failureReason(reply: ModelReply, signal?: AbortSignal): string {
 	return "the answer contained no block";
 }
 
+/** Why this extension cannot make one of its own model requests right now. */
+type BlockedModel = "no-model" | "cursor" | "aux-cursor" | "aux-malformed" | "aux-missing";
+
+/** Notices already shown: one per session and cause, so a blocked provider stays quiet. */
+const shownNotices = new Set<string>();
+
+function warnOnce(ctx: ExtensionContext, cause: string, text: string): void {
+	const key = `${ctx.sessionManager.getSessionId()}|${cause}`;
+	if (shownNotices.has(key)) return;
+	shownNotices.add(key);
+	ctx.ui.notify(text, "warning");
+}
+
+/** One understandable sentence about a blocked request, with the way out. */
+function blockedNotice(blocked: BlockedModel, reference: string): string {
+	if (blocked === "cursor")
+		return 'protokoll: automatic model requests are unavailable with Cursor. Set "auxiliaryModel" in protokoll.json to use a different model for protocol generation.';
+	if (blocked === "aux-cursor")
+		return `protokoll: the auxiliary model "${reference}" is a Cursor model, which cannot serve these requests either. Choose a different "auxiliaryModel" in protokoll.json.`;
+	if (blocked === "aux-malformed")
+		return `protokoll: auxiliaryModel "${reference}" is not "provider/model" – protocol requests are skipped.`;
+	return `protokoll: auxiliaryModel "${reference}" is not a known model – protocol requests are skipped, the session model is not used instead.`;
+}
+
+/**
+ * Which model this extension's own requests (follow-up, backfill, state review, repair) go to:
+ * `auxiliaryModel` when configured, otherwise the model of the session. The model of the normal chat
+ * is never touched. A Cursor model is reported instead of called: the direct request has no session
+ * mapping there, and the raw provider exception would otherwise return on every turn.
+ */
+export function resolveProtocolModel(
+	ctx: ExtensionContext,
+	reference: string,
+): { model?: NonNullable<ExtensionContext["model"]>; blocked?: BlockedModel } {
+	if (reference) {
+		const ref = parseModelRef(reference);
+		if (!ref) return { blocked: "aux-malformed" };
+		const found = ctx.modelRegistry.find(ref.provider, ref.id);
+		if (!found) return { blocked: "aux-missing" };
+		if (isUnsupportedModelCall(found)) return { blocked: "aux-cursor" };
+		return { model: found as NonNullable<ExtensionContext["model"]> };
+	}
+	const model = ctx.model;
+	if (!model) return { blocked: "no-model" };
+	if (isUnsupportedModelCall(model)) return { blocked: "cursor" };
+	return { model };
+}
+
+/** The same, plus the one-time notice for the user. Guards and requests both call this. */
+export function protocolModel(ctx: ExtensionContext, reference: string) {
+	const choice = resolveProtocolModel(ctx, reference);
+	if (choice.blocked && choice.blocked !== "no-model")
+		warnOnce(ctx, `${choice.blocked}|${reference}`, blockedNotice(choice.blocked, reference));
+	return choice;
+}
+
 /** One request; streams when the provider allows it, so the progress shows tokens as they come. */
 async function callModel(
 	ctx: ExtensionContext,
+	config: Pick<ProtocolConfig, "auxiliaryModel">,
 	context: { messages: unknown[] },
 	options: Record<string, unknown>,
 	progress?: { bar: Progress; step: Step },
 ): Promise<ModelReply> {
-	const model = ctx.model;
-	if (!model) return { error: "no model selected" };
+	const choice = protocolModel(ctx, config.auxiliaryModel);
+	const model = choice.model;
+	if (!model) {
+		const blocked = choice.blocked === "cursor" || choice.blocked === "aux-cursor";
+		return {
+			error: blocked
+				? "the provider cannot serve these requests (Cursor)"
+				: `no usable model for protocol requests (${choice.blocked})`,
+			unsupportedProvider: blocked,
+		};
+	}
 	try {
 		const stream = ctx.modelRegistry.streamSimple(model, context as never, options as never) as unknown as {
 			result(): Promise<{ content?: unknown; stopReason?: string; errorMessage?: string }>;
@@ -542,6 +612,7 @@ export default function protokoll(pi: ExtensionAPI) {
 		);
 		const reply = await callModel(
 			ctx,
+			config,
 			{
 				messages: [
 					{ role: "user", content: backfillPrompt(config, turn.number, transcript), timestamp: Date.now() },
@@ -574,6 +645,7 @@ export default function protokoll(pi: ExtensionAPI) {
 		for (let attempt = 0; ; attempt++) {
 			const reply = await callModel(
 				ctx,
+				config,
 				{ messages: current },
 				{ maxTokens: config.followUpMaxTokens, ...(signal ? { signal } : {}), ...chatReasoningOption() },
 				progress,
@@ -666,7 +738,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			!drafts.some((d) => d.userEntryId === turn.userEntryId)
 		) {
 			drafts.push(
-				config.followUp && ctx.model
+				config.followUp && protocolModel(ctx, config.auxiliaryModel).model
 					? await followUp(event.context.llmMessages, turn, ctx)
 					: { version: 1, userEntryId: turn.userEntryId, turn: turn.number, source: "missing" },
 			);
@@ -682,7 +754,7 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	async function followUp(llmMessages: unknown[], turn: Turn, ctx: ExtensionContext): Promise<ProtocolEntryData> {
 		const base = { version: 1 as const, userEntryId: turn.userEntryId, turn: turn.number };
-		const model = ctx.model;
+		const { model } = protocolModel(ctx, config.auxiliaryModel);
 		if (!model) return { ...base, source: "missing" };
 		const bar = new Progress(ctx, "protokoll");
 		const step = bar.add(`turn ${turn.number}: block missing – asking for it`);
@@ -752,6 +824,8 @@ export default function protokoll(pi: ExtensionAPI) {
 	 * these requests use the chat's thinking level unchanged, the same way Pi's agent passes it.
 	 */
 	function chatReasoningOption() {
+		// a different model has no chat cache to protect, so its own thinking level applies
+		if (config.auxiliaryModel) return reasoningOption();
 		const level = pi.getThinkingLevel();
 		return level === "off" ? {} : { reasoning: level };
 	}
@@ -774,6 +848,7 @@ export default function protokoll(pi: ExtensionAPI) {
 	) {
 		const reply = await callModel(
 			ctx,
+			config,
 			{ messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
 			{ maxTokens, ...(signal ? { signal } : {}), ...reasoningOption(level) },
 			progress,
@@ -796,7 +871,7 @@ export default function protokoll(pi: ExtensionAPI) {
 		bar: Progress,
 	): Promise<Map<string, ProtocolEntryData>> {
 		const extra = new Map<string, ProtocolEntryData>();
-		if (!config.backfill || !ctx.model) return extra;
+		if (!config.backfill || !protocolModel(ctx, config.auxiliaryModel).model) return extra;
 		const protocols = collectProtocols(branch);
 		const turns = collectTurns(branch);
 		const lastTurn = turns[turns.length - 1];
@@ -905,6 +980,7 @@ export default function protokoll(pi: ExtensionAPI) {
 				}));
 				const reply = await callModel(
 					ctx,
+					config,
 					{ messages: [{ role: "user", content: supplementPrompt(items), timestamp: Date.now() }] },
 					{ maxTokens: config.backfillMaxTokens, ...reasoningOption() },
 					{ bar, step },
@@ -994,8 +1070,9 @@ export default function protokoll(pi: ExtensionAPI) {
 		const words = Math.max(60, Math.floor(narrativeTokens * 0.7));
 		let newlyFolded = 0;
 
-		const willConsolidate = useModel && config.consolidate && !!ctx.model;
-		if (useModel && ctx.model && (plan.toFold.length || plan.foreign.length)) {
+		const foldModel = protocolModel(ctx, config.auxiliaryModel).model;
+		const willConsolidate = useModel && config.consolidate && !!foldModel;
+		if (useModel && foldModel && (plan.toFold.length || plan.foreign.length)) {
 			const chunks = foldInputs(plan, branch, config, extra);
 			const steps = chunks.map((c, i) =>
 				bar?.add(
@@ -1555,7 +1632,7 @@ export default function protokoll(pi: ExtensionAPI) {
 					return;
 				}
 				case "repair": {
-					if (!ctx.model) {
+					if (!protocolModel(ctx, config.auxiliaryModel).model) {
 						ctx.ui.notify("protokoll: no model selected", "error");
 						return;
 					}

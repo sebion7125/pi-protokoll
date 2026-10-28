@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.5 – 2026-10-29
+
+- Pi's Cursor path has no session mapping for the direct requests this extension makes. Such a model (`provider: "cursor"` or `api: "cursor-sdk"`) is therefore never asked directly: one understandable notice per session and cause, the protocol is recorded as missing, and compaction, backfill and the rest continue without blocked retries. Blocks the model wrote inline are still recognised, stored and stripped.
+- New configuration key `auxiliaryModel` (`"provider/model"`, default empty): the model for **the extension's own requests** – follow-up, transcript backfill, folding the state of work, rule review and `repair`. The model of the normal chat is untouched. An unknown or malformed reference is reported and the request skipped, never silently replaced by the session model. `/protokoll reload` picks it up.
+
 ## 0.9.4 – 2026-10-29
 
 - The bus report of a running pass now carries every step, not only the current one: state, the step's own time, how many characters the model has sent and whether it is thinking or writing. A web view shows the same status the console widget shows.

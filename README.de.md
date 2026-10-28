@@ -144,6 +144,21 @@ Alle Schlüssel mit Standardwerten und Bedeutung stehen in der Tabelle der
 [englischen README](README.md#configuration); die Werte in `protokoll.example.json` sind die
 Standardwerte.
 
+### Hilfsmodell
+
+`auxiliaryModel` (z. B. `"openai/gpt-4.1-mini"`) gilt **nur** für die eigenen Anfragen der
+Erweiterung: Nachfrage, Transkript-Nachtrag, Falten des Arbeitsstands, Regelprüfung und `repair`.
+Das Modell des normalen Chats bleibt unverändert.
+
+Pi's Cursor-Pfad hat keine Session-Zuordnung für diese direkten Anfragen. Ist das Session-Modell ein
+Cursor-Modell (`provider: "cursor"` oder `api: "cursor-sdk"`) und kein Hilfsmodell gesetzt, schickt
+die Erweiterung gar keine Anfrage: sie sagt das einmal pro Sitzung, behandelt das Protokoll als
+fehlend, und Compacting sowie alles übrige laufen normal weiter. Mit `auxiliaryModel` auf einem
+anderen Anbieter funktionieren Nachfrage, Nachtrag und Prüfung wieder. Eine ungültige oder unbekannte
+Referenz wird gemeldet und die Anfrage ausgelassen – sie fällt nicht still auf das Session-Modell
+zurück. Eine Anfrage, die den Chat-Kontext wiederholt, muss in das Kontextfenster des Hilfsmodells
+passen.
+
 ## Entwicklung
 
 ```bash

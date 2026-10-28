@@ -149,6 +149,7 @@ The German command names of earlier versions (`zeigen`, `anheften`, `lösen`, `a
 | `consolidateReasoning` | `"low"` | thinking level of the review; comparing each rule with the later ones works much better with some thinking |
 | `followUpMaxTokens` | `16384` | output limit of requests with chat context; thinking counts against it |
 | `followUpTimeoutMs` | `600000` | time limit per request with chat context |
+| `auxiliaryModel` | `""` | model for the extension's own requests as `"provider/model"`; empty uses the session model. Never changes the model of the normal chat |
 | `compaction` | `"protocol"` | `"default"` leaves compaction entirely to Pi |
 | `consolidate` | `true` | run the review of rules and open items |
 | `keepRecentTurns` | `3` | keep this many last turns verbatim … |
@@ -174,6 +175,27 @@ The whole summary is at most about `detailMaxTokens + statusMaxTokens + 400` tok
 
 **When** to compact is still Pi's decision: `context > contextWindow − compaction.reserveTokens`
 (`~/.pi/agent/settings.json`). Make sure `contextWindow` in `models.json` matches your server.
+
+### Auxiliary model
+
+`auxiliaryModel` applies to the extension's own requests only: follow-up, transcript backfill,
+folding the state of work, the review of rules and `repair`. The model of your chat stays exactly as
+it is.
+
+```json
+{
+  "auxiliaryModel": "openai/gpt-4.1-mini"
+}
+```
+
+Pi's Cursor path has no session mapping for the kind of direct request the extension makes, so
+asking a Cursor model directly does not work. When your session model is a Cursor model
+(`provider: "cursor"` or `api: "cursor-sdk"`) and no auxiliary model is configured, the extension
+sends no request at all: it says so once per session, treats the protocol as missing and leaves
+compaction and everything else working. Set `auxiliaryModel` to a model from another provider to get
+the follow-up, backfill and review back. A malformed or unknown reference is reported and the request
+is skipped – it never silently falls back to the session model. Note that a request which repeats the
+chat context has to fit the auxiliary model's context window.
 
 ## Development
 

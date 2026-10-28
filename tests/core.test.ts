@@ -23,13 +23,16 @@ import {
 	type FoldState,
 	foldInputs,
 	hideBlocks,
+	isUnsupportedModelCall,
 	loadConfig,
+	mergeConfig,
 	narrativeBudget,
 	type PlainEntry,
 	type ProtocolConfig,
 	type ProtocolEntryData,
 	parseBlock,
 	parseConsolidation,
+	parseModelRef,
 	parseSupplement,
 	planCompaction,
 	renderDetailBlock,
@@ -883,5 +886,37 @@ describe("index of older turns", () => {
 		];
 		const out = diagnosticAppendix(branch, DEFAULT_CONFIG, false);
 		expect(out).toContain("| 1 | protokoll | 45 s | 900 |");
+	});
+});
+
+describe("the model of the extension's own requests", () => {
+	it("is unset by default, so the session model keeps being used", () => {
+		expect(DEFAULT_CONFIG.auxiliaryModel).toBe("");
+	});
+
+	it("takes a provider/model reference, and only splits at the first slash", () => {
+		const warnings: string[] = [];
+		const merged = mergeConfig(DEFAULT_CONFIG, { auxiliaryModel: "openai/gpt-4.1-mini" }, "t.json", warnings);
+		expect(merged.auxiliaryModel).toBe("openai/gpt-4.1-mini");
+		expect(warnings).toEqual([]);
+		expect(parseModelRef("openai/google/gemini-pro")).toEqual({ provider: "openai", id: "google/gemini-pro" });
+		for (const bad of ["", "gpt-4", "/only-id", "provider/", "  /x"]) expect(parseModelRef(bad)).toBeNull();
+	});
+
+	it("reports a malformed reference instead of applying it", () => {
+		const warnings: string[] = [];
+		const merged = mergeConfig(DEFAULT_CONFIG, { auxiliaryModel: "gpt-4" }, "t.json", warnings);
+		expect(merged.auxiliaryModel).toBe("");
+		expect(warnings.some((w) => w.includes('"auxiliaryModel"'))).toBe(true);
+		const typed: string[] = [];
+		expect(mergeConfig(DEFAULT_CONFIG, { auxiliaryModel: 7 }, "t.json", typed).auxiliaryModel).toBe("");
+		expect(typed.length).toBe(1);
+	});
+
+	it("knows the provider that cannot serve a direct request", () => {
+		expect(isUnsupportedModelCall({ provider: "cursor", api: "openai-completions" })).toBe(true);
+		expect(isUnsupportedModelCall({ provider: "other", api: "cursor-sdk" })).toBe(true);
+		expect(isUnsupportedModelCall({ provider: "openai", api: "openai-completions" })).toBe(false);
+		expect(isUnsupportedModelCall({})).toBe(false);
 	});
 });

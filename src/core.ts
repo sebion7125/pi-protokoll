@@ -31,6 +31,12 @@ export interface ProtocolConfig {
 	followUpMaxTokens: number;
 	/** Hard time limit for the follow-up request. */
 	followUpTimeoutMs: number;
+	/**
+	 * Model for this extension's own requests (follow-up, backfill, state review, repair) as
+	 * "provider/model", for example "openai/gpt-4.1-mini". Empty means: use the session's model.
+	 * The model of the normal chat is never changed by this.
+	 */
+	auxiliaryModel: string;
 	/** "protocol": build the compaction summary from the protocol; "default": leave compaction to Pi. */
 	compaction: "protocol" | "default";
 	/** Let the model tidy rules and open items once per compaction (the turn log is never rewritten). */
@@ -81,6 +87,7 @@ export const DEFAULT_CONFIG: ProtocolConfig = {
 	consolidateReasoning: "low",
 	followUpMaxTokens: 16384,
 	followUpTimeoutMs: 600_000,
+	auxiliaryModel: "",
 	compaction: "protocol",
 	consolidate: true,
 	keepRecentTurns: 3,
@@ -115,6 +122,26 @@ const MINIMUM: Partial<Record<keyof ProtocolConfig, number>> = {
 
 export const CONFIG_FILE_NAME = "protokoll.json";
 
+/**
+ * "provider/model" as it is written in protokoll.json. Split at the first slash, so model ids that
+ * contain slashes work too. Returns null for anything that is not such a reference.
+ */
+export function parseModelRef(ref: string): { provider: string; id: string } | null {
+	const at = ref.indexOf("/");
+	if (at <= 0 || at === ref.length - 1) return null;
+	const provider = ref.slice(0, at).trim();
+	const id = ref.slice(at + 1).trim();
+	return provider && id ? { provider, id } : null;
+}
+
+/**
+ * Pi's Cursor path has no session mapping for the direct requests this extension makes, so asking
+ * that provider directly fails. Detected from the model itself, without knowing the Cursor SDK.
+ */
+export function isUnsupportedModelCall(model: { provider?: string; api?: string }): boolean {
+	return model.provider === "cursor" || model.api === "cursor-sdk";
+}
+
 /** Validates one raw config object; unknown keys and wrong types are reported, not applied. */
 export function mergeConfig(base: ProtocolConfig, raw: unknown, source: string, warnings: string[]): ProtocolConfig {
 	if (raw === undefined || raw === null) return base;
@@ -147,6 +174,10 @@ export function mergeConfig(base: ProtocolConfig, raw: unknown, source: string, 
 		}
 		if (k === "tag" && !/^[A-Za-z][A-Za-z0-9_-]*$/.test(value as string)) {
 			warnings.push(`${source}: "tag" may only contain letters, digits, - and _ – ignored`);
+			continue;
+		}
+		if (k === "auxiliaryModel" && (value as string) !== "" && !parseModelRef(value as string)) {
+			warnings.push(`${source}: "auxiliaryModel" must be "provider/model" or empty – ignored`);
 			continue;
 		}
 		if (expected === "number" && (!Number.isFinite(value as number) || (value as number) < 0)) {

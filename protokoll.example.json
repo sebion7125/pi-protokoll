@@ -8,6 +8,7 @@
   "consolidateReasoning": "low",
   "followUpMaxTokens": 16384,
   "followUpTimeoutMs": 600000,
+  "auxiliaryModel": "",
   "compaction": "protocol",
   "consolidate": true,
   "keepRecentTurns": 3,
