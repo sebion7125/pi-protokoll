@@ -57,6 +57,7 @@ import {
 	type FoldState,
 	foldInputs,
 	foldPrompt,
+	hasProtocolKeys,
 	hideBlocks,
 	INTERRUPTED_PROMPT,
 	isNoneItem,
@@ -650,7 +651,8 @@ export default function protokoll(pi: ExtensionAPI) {
 				{ maxTokens: config.followUpMaxTokens, ...(signal ? { signal } : {}), ...chatReasoningOption() },
 				progress,
 			);
-			const hasBlock = !!reply.text && extractBlock(reply.text, config.tag).body !== undefined;
+			const body = reply.text ? extractBlock(reply.text, config.tag).body : undefined;
+			const hasBlock = body !== undefined && hasProtocolKeys(body);
 			if (!reply.toolCall || hasBlock || reply.error !== undefined || attempt >= TOOL_REDIRECTS) return reply;
 			const calls = ((reply.message?.content as { type?: string; id?: string; name?: string }[]) ?? []).filter(
 				(b) => b?.type === "toolCall",
@@ -678,7 +680,15 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	function toEntry(turn: Turn, text: string): ProtocolEntryData | undefined {
 		const { body } = extractBlock(text, config.tag);
-		const fields = parseBlock(body ?? text);
+		// without a block only a bare reply that already starts with protocol keys is used, never prose
+		const usable =
+			body !== undefined
+				? body
+				: /^[ \t]*[-*•]?[ \t]*[A-Za-z]+[ \t]*:/.test(text.trim().split(/\r?\n/)[0] ?? "")
+					? text
+					: undefined;
+		if (usable === undefined) return undefined;
+		const fields = parseBlock(usable);
 		if (!fields || (fields.result.length === 0 && fields.decision.length === 0)) return undefined;
 		return {
 			version: 1,
@@ -686,7 +696,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			turn: turn.number,
 			source: "backfill",
 			fields,
-			raw: body ?? text,
+			raw: usable,
 		};
 	}
 
@@ -700,7 +710,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			const part = parts[i];
 			if (part.type !== "text") continue;
 			const { body, rest } = extractBlock(part.text, config.tag);
-			if (body === undefined) continue;
+			if (body === undefined || !hasProtocolKeys(body)) continue;
 			const fields = parseBlock(body);
 			// keyed by the running turn: a run can span several turns (queued follow-up messages)
 			const turn = collectTurns(plainBranch(ctx)).at(-1);

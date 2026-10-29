@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.6 – 2026-10-29
+
+- Where the block is looked for is now decided deliberately instead of by guesswork, so an answer that quotes the tag no longer loses its text:
+  - tags inside fenced code blocks and inline code spans are examples and are ignored by both extraction and display;
+  - a block that closes the answer wins; if a block sits earlier in the answer, the text after it stays in the answer;
+  - an unclosed tag counts as a block only when it opens a line and is followed by protocol keys (the model stopped early); a tag in the middle of a sentence is prose;
+  - while streaming, a block is hidden only when it opens a line, so prose after a quoted tag stays visible;
+  - a body without a single known key is no longer stored, and a reply without a block is no longer parsed as fields – the protocol is recorded as missing and requested instead.
+
 ## 0.9.5 – 2026-10-29
 
 - Pi's Cursor path has no session mapping for the direct requests this extension makes. Such a model (`provider: "cursor"` or `api: "cursor-sdk"`) is therefore never asked directly: one understandable notice per session and cause, the protocol is recorded as missing, and compaction, backfill and the rest continue without blocked retries. Blocks the model wrote inline are still recognised, stored and stripped.

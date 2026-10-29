@@ -728,6 +728,21 @@ describe("protokoll extension", () => {
 		expect(byId).toEqual({ [first.id]: "first", [second.id]: "second" });
 	});
 
+	it("leaves an answer alone when the tag only appears quoted in code", async () => {
+		const answer = "Heute: Inline-`<protocol>`-Blöcke und der Rest der Antwort bleibt stehen.";
+		const t = await h.turn("why?", answer);
+		expect(t.message.content[0].text).toBe(answer);
+		expect(t.draft?.source).toBe("missing"); // recorded as missing instead of guessing one from the quote
+		expect(h.requests.length).toBeGreaterThan(0); // it asks for the protocol instead of guessing one from the quote
+	});
+
+	it("cuts a block written early and keeps the prose after it", async () => {
+		const t = await h.turn("why?", "A\n<protocol>\nresult: early\n</protocol>\nthe answer continues here");
+		expect(t.message.content[0].text).toBe("A\n\nthe answer continues here");
+		expect(t.draft?.source).toBe("inline");
+		expect(t.draft?.fields?.result[0]).toBe("early");
+	});
+
 	it("writes a chosen thinking level into OpenAI-compatible requests", () => {
 		expect(forceThinkingLevel({ m: 1 }, { api: "openai-completions" }, "low")).toEqual({
 			m: 1,

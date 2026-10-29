@@ -37,8 +37,9 @@ gehören zum laufenden Zug.
    einem `<protocol>`-Block zu beenden: `result`, `decision`, `files`, `open`, `rule`, `revoke`,
    `index`, `tags`. Der Text ändert sich nie, damit der Präfix-Cache des Servers gültig bleibt.
 2. **Antwort fertig.** Der Block wird aus der Antwort geschnitten und als Sitzungseintrag
-   gespeichert, eingeklappt angezeigt (`▸ protocol turn 7: …`). Die Zugnummer vergibt die
-   Erweiterung, nicht das Modell.
+   gespeichert, eingeklappt angezeigt (`▸ protocol turn 7: …`). Steht der Block früh, bleibt der
+   Text danach in der Antwort; ein in Code oder im Satz zitiertes Tag wird nicht angefasst. Die
+   Zugnummer vergibt die Erweiterung, nicht das Modell.
 3. **Block fehlt.** Einmalige Nachforderung mit unverändertem Kontext plus kurzer Anweisung.
    Der Prompt beginnt wie der gerade gelaufene, ein Präfix-Cache liest also nur die neuen Token.
    Gespeichert wird nur der Block, nicht der Austausch. Ignoriert das Modell die Nachforderung, wird der Block

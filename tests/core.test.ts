@@ -22,6 +22,7 @@ import {
 	extractBlock,
 	type FoldState,
 	foldInputs,
+	hasProtocolKeys,
 	hideBlocks,
 	isUnsupportedModelCall,
 	loadConfig,
@@ -100,6 +101,45 @@ describe("extractBlock", () => {
 	it("returns the text unchanged without a block", () => {
 		expect(extractBlock("plain", "protocol")).toEqual({ body: undefined, rest: "plain" });
 	});
+	it("leaves a tag quoted in an inline code span alone", () => {
+		const text = "Heute: Inline-`<protocol>`-Blöcke und auxiliaryModel.";
+		const r = extractBlock(text, "protocol");
+		expect(r.body).toBeUndefined();
+		expect(r.rest).toBe(text);
+	});
+	it("ignores an example block inside a fenced code block", () => {
+		const text = "Example:\n```\n<protocol>\nresult: example\n</protocol>\n```\nThat is the format.";
+		const r = extractBlock(text, "protocol");
+		expect(r.body).toBeUndefined();
+		expect(r.rest).toBe(text);
+	});
+	it("prefers the trailing block and keeps a quoted example in the answer", () => {
+		const text =
+			"Example:\n```\n<protocol>\nresult: example\n</protocol>\n```\nReal answer.\n<protocol>\nresult: real\n</protocol>";
+		const r = extractBlock(text, "protocol");
+		expect(r.body).toBe("result: real");
+		expect(r.rest).toContain("Real answer.");
+		expect(r.rest).toContain("result: example");
+	});
+	it("keeps prose after a block written early in the answer", () => {
+		const r = extractBlock("A\n<protocol>\nresult: early\n</protocol>\nand the answer continues here", "protocol");
+		expect(r.body).toBe("result: early");
+		expect(r.rest).toBe("A\n\nand the answer continues here");
+	});
+	it("does not treat an unclosed tag inside a sentence as a block", () => {
+		const text = "see <protocol> for the format, and here is the rest of the answer";
+		const r = extractBlock(text, "protocol");
+		expect(r.body).toBeUndefined();
+		expect(r.rest).toBe(text);
+	});
+});
+
+describe("hasProtocolKeys", () => {
+	it("recognises protocol keys and their aliases", () => {
+		expect(hasProtocolKeys("result: x")).toBe(true);
+		expect(hasProtocolKeys("- summary: x")).toBe(true);
+		expect(hasProtocolKeys("prose, no keys")).toBe(false);
+	});
 });
 
 describe("hideBlocks", () => {
@@ -110,6 +150,19 @@ describe("hideBlocks", () => {
 		expect(hideBlocks("Hi\n<protocol>\nresu", "protocol", true)).toBe("Hi");
 		expect(hideBlocks("Hi\n<proto", "protocol", true)).toBe("Hi");
 		expect(hideBlocks("a < b", "protocol", true)).toBe("a < b");
+	});
+	it("keeps an example block quoted in a fence visible", () => {
+		const md = "Example:\n```\n<protocol>\nresult: x\n</protocol>\n```";
+		expect(hideBlocks(md, "protocol", false)).toBe(md);
+		expect(hideBlocks(md, "protocol", true)).toBe(md);
+	});
+	it("keeps prose around a tag quoted in a code span while streaming", () => {
+		const md = "Heute: Inline-`<protocol>`-Blöcke und der Rest der Antwort.";
+		expect(hideBlocks(md, "protocol", true)).toBe(md);
+	});
+	it("does not cut the answer at a tag that sits inside a sentence", () => {
+		const md = "see <protocol> for the format\nand the rest of the answer";
+		expect(hideBlocks(md, "protocol", true)).toBe(md);
 	});
 });
 

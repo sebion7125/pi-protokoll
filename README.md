@@ -34,7 +34,9 @@ Messages you send while the model is working belong to the running turn.
    `<protocol>` block: `result`, `decision`, `files`, `open`, `rule`, `revoke`, `index`, `tags`.
    The text never changes, so the server's prefix cache stays valid.
 2. **Answer done.** The block is cut out of the answer and stored as a session entry, shown
-   collapsed (`▸ protocol turn 7: …`). The extension numbers the turns, not the model.
+   collapsed (`▸ protocol turn 7: …`). A block written early keeps the text after it in the answer;
+   a tag quoted inside code or inside a sentence is left alone. The extension numbers the turns,
+   not the model.
 3. **Block missing.** The extension asks once more with the unchanged context plus a short
    instruction. The prompt starts like the one just run, so a prefix cache only reads the new
    tokens. Only the block is kept, not the exchange. If the model ignores the request, the block is written

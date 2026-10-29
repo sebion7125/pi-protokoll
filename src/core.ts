@@ -358,38 +358,111 @@ export function backfillPrompt(config: ProtocolConfig, turnNumber: number, trans
 }
 
 /**
- * Finds the last <tag>…</tag> block. An opening tag without a closing one counts as a block
- * running to the end of the text (the model stopped early).
+ * Ranges of fenced code blocks and inline code spans. A tag quoted inside them is an example, not
+ * protocol, so neither extraction nor display may touch it.
+ */
+export function codeRanges(text: string): Array<[number, number]> {
+	const ranges: Array<[number, number]> = [];
+	const fence = /(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n[ \t]*\2[ \t]*(?=\n|$)/g;
+	for (let m = fence.exec(text); m; m = fence.exec(text)) {
+		const start = m[1] === "\n" ? m.index + 1 : m.index;
+		ranges.push([start, start + m[0].length - m[1].length]);
+	}
+	const span = /`[^`\n]+`/g;
+	for (let m = span.exec(text); m; m = span.exec(text)) ranges.push([m.index, m.index + m[0].length]);
+	return ranges;
+}
+
+function insideRanges(ranges: Array<[number, number]>, pos: number): boolean {
+	return ranges.some(([a, b]) => pos >= a && pos < b);
+}
+
+function atLineStart(text: string, pos: number): boolean {
+	return /^[ \t]*$/.test(text.slice(0, pos).split("\n").pop() ?? "");
+}
+
+/** True when the text carries at least one known protocol key on a line of its own. */
+export function hasProtocolKeys(text: string): boolean {
+	for (const line of text.split(/\r?\n/)) {
+		const m = /^[-*•]?\s*([A-Za-z]+)\s*:/.exec(line.trim());
+		if (m && FIELD_ALIASES[m[1].toLowerCase()]) return true;
+	}
+	return false;
+}
+
+/**
+ * Finds the protocol block and returns the answer without it. Tags inside code are skipped. A block
+ * that closes the answer wins; otherwise the last closed block is used and the text after it stays
+ * in the answer. An unclosed tag counts only when it opens a line and is followed by protocol keys
+ * (the model stopped early); a tag quoted inside a sentence is left alone.
  */
 export function extractBlock(text: string, tag: string): { body: string | undefined; rest: string } {
-	const open = new RegExp(`<${tag}>`, "gi");
-	let lastOpen = -1;
-	let lastOpenLen = 0;
-	for (let m = open.exec(text); m; m = open.exec(text)) {
-		lastOpen = m.index;
-		lastOpenLen = m[0].length;
+	const ranges = codeRanges(text);
+	const closeLen = tag.length + 3;
+	const openRe = new RegExp(`<${tag}>`, "gi");
+	const closeRe = new RegExp(`</${tag}>`, "i");
+	const closed: Array<{ open: number; openLen: number; end: number }> = [];
+	const unclosed: Array<{ open: number; openLen: number }> = [];
+	for (let m = openRe.exec(text); m; m = openRe.exec(text)) {
+		if (insideRanges(ranges, m.index)) continue;
+		const after = text.slice(m.index + m[0].length);
+		const close = closeRe.exec(after);
+		if (close)
+			closed.push({ open: m.index, openLen: m[0].length, end: m.index + m[0].length + close.index + closeLen });
+		else unclosed.push({ open: m.index, openLen: m[0].length });
 	}
-	if (lastOpen < 0) return { body: undefined, rest: text };
-	const after = text.slice(lastOpen + lastOpenLen);
-	const close = new RegExp(`</${tag}>`, "i").exec(after);
-	const body = close ? after.slice(0, close.index) : after;
-	const tail = close ? after.slice(close.index + close[0].length) : "";
-	const rest = (text.slice(0, lastOpen).replace(/\s+$/, "") + (tail.trim() ? `\n\n${tail.trim()}` : "")).trimEnd();
+	let chosen: { open: number; openLen: number; end?: number } | undefined;
+	for (let i = closed.length - 1; i >= 0 && !chosen; i--) {
+		if (text.slice(closed[i].end).trim() === "") chosen = closed[i];
+	}
+	if (!chosen && closed.length) chosen = closed[closed.length - 1];
+	if (!chosen) {
+		for (let i = unclosed.length - 1; i >= 0; i--) {
+			const u = unclosed[i];
+			if (atLineStart(text, u.open) && hasProtocolKeys(text.slice(u.open + u.openLen))) {
+				chosen = u;
+				break;
+			}
+		}
+	}
+	if (!chosen) return { body: undefined, rest: text };
+	const end = chosen.end ?? text.length;
+	const body = text.slice(chosen.open + chosen.openLen, end - (chosen.end ? closeLen : 0));
+	const tail = chosen.end ? text.slice(end) : "";
+	const rest = (text.slice(0, chosen.open).replace(/\s+$/, "") + (tail.trim() ? `\n\n${tail.trim()}` : "")).trimEnd();
 	return { body: body.trim(), rest };
 }
 
-/** Hides complete blocks and, while streaming, a block that has started but not finished. */
+/**
+ * Hides complete blocks and, while streaming, a block that has started but not finished. Blocks
+ * quoted in code stay visible, and a tag that does not open a line counts as prose.
+ */
 export function hideBlocks(markdown: string, tag: string, streaming: boolean): string {
-	let out = markdown.replace(new RegExp(`\\s*<${tag}>[\\s\\S]*?</${tag}>\\s*`, "gi"), "\n");
+	const ranges = codeRanges(markdown);
+	const full = new RegExp(`\\s*<${tag}>[\\s\\S]*?</${tag}>\\s*`, "gi");
+	let out = "";
+	let from = 0;
+	for (let m = full.exec(markdown); m; m = full.exec(markdown)) {
+		if (insideRanges(ranges, m.index)) continue;
+		out += markdown.slice(from, m.index) + "\n";
+		from = m.index + m[0].length;
+	}
+	out += markdown.slice(from);
 	if (streaming) {
-		const idx = out.search(new RegExp(`<${tag}>`, "i"));
-		if (idx >= 0) out = out.slice(0, idx);
+		const code = codeRanges(out);
+		const openRe = new RegExp(`<${tag}>`, "gi");
+		for (let m = openRe.exec(out); m; m = openRe.exec(out)) {
+			if (insideRanges(code, m.index) || !atLineStart(out, m.index)) continue;
+			out = out.slice(0, m.index);
+			break;
+		}
 		// an opening tag that is still being typed: "<pro", "<protoc"…
 		const lt = out.lastIndexOf("<");
 		if (
 			lt >= 0 &&
 			out.length - lt <= tag.length + 1 &&
-			`<${tag}>`.toLowerCase().startsWith(out.slice(lt).toLowerCase())
+			`<${tag}>`.toLowerCase().startsWith(out.slice(lt).toLowerCase()) &&
+			atLineStart(out, lt)
 		) {
 			out = out.slice(0, lt);
 		}
