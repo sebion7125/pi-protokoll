@@ -589,6 +589,13 @@ describe("protokoll extension", () => {
 		await h.turn("next", "B\n<protocol>result: stored</protocol>");
 		expect(h.switchNotes().length).toBe(2); // one new note with the rules, the old one is gone from the context
 		expect(String(h.switchNotes().at(-1))).toContain("The following protocol rules apply");
+		// what the model is sent: the rules are still in its context …
+		const visible = JSON.stringify(h.ctx.sessionManager.buildSessionProjection().messages);
+		expect(visible).toContain("The following protocol rules apply");
+		expect(visible).not.toContain(note.content as string); // … and only the new note, not both
+		// … the prefix still never carried the section, and the protocol keeps being written
+		expect(h.promptText()).toBe("");
+		expect(h.lastProtocol()?.fields?.result).toEqual(["stored"]);
 	});
 
 	// ------------------------------------------------------------------ v3
