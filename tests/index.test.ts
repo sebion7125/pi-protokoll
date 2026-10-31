@@ -59,6 +59,15 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 		},
 		appendEntry: (customType: string, data: unknown) =>
 			branch.push({ id: `c${++seq}`, type: "custom", customType, data }),
+		/** Pi appends the message where it stands; the model reads it from there on. */
+		sendMessage: (message: any) =>
+			branch.push({
+				id: `m${++seq}`,
+				type: "custom_message",
+				customType: message.customType,
+				content: message.content,
+				details: message.details,
+			}),
 	};
 	const ctx: any = {
 		cwd: mkdtempSync(join(tmpdir(), "pi-cwd-")),
@@ -73,12 +82,43 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 		sessionManager: {
 			getBranch: () => branch,
 			getSessionId: () => "s1",
-			buildSessionProjection: () => ({
-				messages: [
-					{ role: "system", content: "S" },
-					...branch.filter((e) => e.type === "message").map((e) => e.message),
-				],
-			}),
+			/** like Pi: a compaction cuts the branch, system messages before the cut drop out, edits remove entries */
+			buildSessionProjection: () => {
+				let entries = branch;
+				const cut = [...branch].reverse().find((e) => e.type === "compaction");
+				if (cut) {
+					const at = branch.indexOf(cut);
+					const kept: PlainEntry[] = [];
+					let found = false;
+					for (let i = 0; i < at; i++) {
+						const e = branch[i];
+						if (e.id === cut.firstKeptEntryId) found = true;
+						if (found && !(e.type === "message" && e.message?.role === "system")) kept.push(e);
+					}
+					entries = [cut, ...kept, ...branch.slice(at + 1)];
+				}
+				const gone = new Set(
+					entries
+						.filter((e) => e.type === "context_edit" && e.replacement === null && e.targetId)
+						.map((e) => e.targetId as string),
+				);
+				return {
+					messages: entries
+						.filter((e) => !gone.has(e.id))
+						.flatMap((e) =>
+							e.type === "message"
+								? [e.message]
+								: e.type === "custom_message"
+									? [{ role: "custom", customType: e.customType, content: e.content, details: e.details }]
+									: e.type === "compaction"
+										? [
+												...(e.systemMessage ? [e.systemMessage] : []),
+												{ role: "compactionSummary", summary: e.summary ?? "" },
+											]
+										: [],
+						),
+				};
+			},
 		},
 		model: { id: "m", provider: "test", contextWindow: 10_000 },
 		getContextUsage: () => ({ contextWindow: 10_000, tokens: 0, percent: 0 }),
@@ -95,9 +135,49 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 		signal: undefined,
 	};
 	protokoll(pi);
+	/** Sections the model has: every later system message patches single ones (null removes one). */
+	const sectionsOfModel = () => {
+		const out: Record<string, string> = {};
+		for (const e of branch) {
+			if (e.type !== "message" || e.message?.role !== "system") continue;
+			const patches = (e.message as { sections?: Record<string, string | null> }).sections ?? {};
+			for (const [name, value] of Object.entries(patches)) {
+				if (value === null) delete out[name];
+				else out[name] = value;
+			}
+		}
+		return out;
+	};
+	/** What Pi makes of the prompt options a handler left: a patch, never a new head. */
+	const applyPrompt = (sections: Record<string, string>) => {
+		if (!branch.some((e) => e.type === "message" && e.message?.role === "system"))
+			branch.unshift({ id: `s${++seq}`, type: "message", message: { role: "system", content: "S" } });
+		const before = sectionsOfModel();
+		const patch: Record<string, string | null> = {};
+		for (const [name, value] of Object.entries(sections)) if (before[name] !== value) patch[name] = value;
+		for (const name of Object.keys(before)) if (sections[name] === undefined) patch[name] = null;
+		if (Object.keys(patch).length)
+			branch.push({
+				id: `s${++seq}`,
+				type: "message",
+				message: { role: "system", content: "", sections: patch } as never,
+			});
+	};
 	const fire = async (name: string, event: any) => {
 		let result: any;
 		for (const h of handlers.get(name) ?? []) result = (await h(event, ctx)) ?? result;
+		if (name === "before_agent_start") {
+			applyPrompt(event.systemPromptOptions?.sections ?? {});
+			const note = result?.message;
+			if (note)
+				branch.push({
+					id: `m${++seq}`,
+					type: "custom_message",
+					customType: note.customType,
+					content: note.content,
+					details: note.details,
+				});
+		}
 		return result;
 	};
 	const addUser = (text: string) => {
@@ -153,6 +233,17 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 		addAssistant,
 		settle,
 		activeTools: () => activeTools,
+		/** the prompt as the model currently has it, byte for byte */
+		promptText: () => Object.values(sectionsOfModel()).join("\n\n"),
+		switchNotes: () =>
+			branch.filter((e) => e.type === "custom_message" && e.customType === "protokoll-switch").map((e) => e.content),
+		/** the sections the model has, as Pi would copy them onto a compaction entry */
+		modelSections: () => sectionsOfModel(),
+		/** the protocol stored last, ignoring the system messages and notes Pi appends around it */
+		lastProtocol: () =>
+			[...branch].reverse().find((e) => e.type === "custom" && e.customType === "protokoll")?.data as
+				| ProtocolEntryData
+				| undefined,
 	};
 }
 
@@ -166,6 +257,7 @@ describe("protokoll extension", () => {
 	it("adds the prompt section and activates the lookup tool", async () => {
 		const { sections } = await h.turn("hi", "Hello.\n<protocol>\nresult: greeted\n</protocol>");
 		expect(sections.session_protocol).toContain("<protocol>");
+		expect(sections.session_protocol).toContain("you have no information about");
 		expect(h.activeTools()).toContain("protocol_turn");
 	});
 
@@ -213,13 +305,17 @@ describe("protokoll extension", () => {
 		expect(transcriptPrompt).toContain("please add fog");
 	});
 
-	it("does nothing after /protokoll aus", async () => {
+	it("does nothing after /protokoll aus and leaves the prompt untouched", async () => {
+		await h.turn("first", "A\n<protocol>result: first</protocol>");
+		const promptBefore = h.promptText();
 		await h.commands.get("protokoll").handler("aus", h.ctx);
 		const { sections, message, draft } = await h.turn("q", "A\n<protocol>result: x</protocol>");
-		expect(sections.session_protocol).toBeUndefined();
+		expect(sections.session_protocol).toBe(promptBefore); // same text, so Pi sends no patch
+		expect(h.promptText()).toBe(promptBefore); // the prefix stays byte for byte
 		expect(message.content[0].text).toContain("<protocol>");
 		expect(draft).toBeUndefined();
-		expect(h.activeTools()).not.toContain("protocol_turn");
+		expect(h.activeTools()).toContain("protocol_turn");
+		expect(h.switchNotes()).toEqual([expect.stringContaining("[pi-protokoll disabled]")]);
 	});
 
 	it("builds the compaction summary from protocols and keeps the latest turns", async () => {
@@ -363,8 +459,136 @@ describe("protokoll extension", () => {
 		expect(res.content[0].text).toContain("Turn 1");
 		expect(res.content[0].text).not.toContain("Turn 2");
 		await h.commands.get("protokoll").handler("aus", h.ctx);
-		expect(h.activeTools()).not.toContain("protocol_search");
-		expect(h.activeTools()).toEqual(["read", "bash"]);
+		expect(h.activeTools()).toContain("protocol_search");
+		const off = await h.tools.get("protocol_search").execute("id", { query: "shadow" }, undefined, undefined, h.ctx);
+		expect(off.content[0].text).toBe("pi-protokoll is disabled");
+		await h.commands.get("protokoll").handler("an", h.ctx);
+		const on = await h.tools.get("protocol_search").execute("id", { query: "shadow" }, undefined, undefined, h.ctx);
+		expect(on.content[0].text).toContain("Turn 1");
+	});
+
+	// ------------------------------------------------------------------ switching on and off
+
+	/**
+	 * Compaction as Pi stores it: the entry cuts the branch and carries the system message of the
+	 * branch over, so the prompt (the section included) outlives it while notes can be cut away.
+	 */
+	const addCompaction = (hh: ReturnType<typeof harness>, keepFrom?: string) => {
+		const cut = keepFrom ?? hh.branch.find((e) => e.message?.role === "user")!.id;
+		hh.branch.push({
+			id: `cmp${hh.branch.length}`,
+			type: "compaction",
+			summary: "summary of the older turns",
+			firstKeptEntryId: cut,
+			tokensBefore: 9000,
+			systemMessage: { role: "system", content: "", sections: hh.modelSections() } as never,
+		} as never);
+	};
+
+	it("withdraws the rules with one note per change, not per command", async () => {
+		await h.turn("first", "A\n<protocol>result: first</protocol>");
+		const cmd = h.commands.get("protokoll");
+		await cmd.handler("off", h.ctx);
+		await cmd.handler("off", h.ctx);
+		await h.turn("second", "B");
+		await cmd.handler("on", h.ctx);
+		await cmd.handler("on", h.ctx);
+		await cmd.handler("off", h.ctx);
+		expect(h.switchNotes()).toEqual([
+			expect.stringContaining("[pi-protokoll disabled]"),
+			expect.stringContaining("[pi-protokoll enabled]"),
+			expect.stringContaining("[pi-protokoll disabled]"),
+		]);
+	});
+
+	it("keeps the section out of the prompt when the session ran without it and brings the rules as a message", async () => {
+		h = harness([], { enabled: false });
+		await h.fire("session_start", { reason: "startup" });
+		const first = await h.turn("without protokoll", "A\n<protocol>result: ignored</protocol>");
+		expect(first.sections.session_protocol).toBeUndefined();
+		expect(first.draft).toBeUndefined();
+		const promptBefore = h.promptText();
+
+		await h.commands.get("protokoll").handler("on", h.ctx);
+		expect(h.switchNotes()).toEqual([expect.stringContaining("[pi-protokoll enabled] The following protocol rules")]);
+		expect(String(h.switchNotes()[0])).toContain("tags: 3-6 search terms");
+
+		const second = await h.turn("now with protokoll", "B\n<protocol>result: stored</protocol>");
+		expect(second.sections.session_protocol).toBeUndefined(); // the prefix is untouched …
+		expect(h.promptText()).toBe(promptBefore); // … byte for byte
+		expect(second.draft?.fields?.result).toEqual(["stored"]); // … and the rules in the message are enough
+		expect(h.switchNotes().length).toBe(1); // no second note in the next runs
+	});
+
+	it("takes section and tools out with off --strip and puts both back with on", async () => {
+		await h.turn("first", "A\n<protocol>result: first</protocol>");
+		await h.commands.get("protokoll").handler("off --strip", h.ctx);
+		expect(h.activeTools()).not.toContain("protocol_turn");
+		expect(h.switchNotes()).toEqual([]); // the rules are gone, so nothing to withdraw
+		const { sections, draft } = await h.turn("second", "B\n<protocol>result: x</protocol>");
+		expect(sections.session_protocol).toBeUndefined();
+		expect(draft).toBeUndefined();
+		expect(h.notes.some((n) => n.includes("reads the whole context again"))).toBe(true);
+
+		await h.commands.get("protokoll").handler("on", h.ctx);
+		expect(h.activeTools()).toContain("protocol_turn");
+		const back = await h.turn("third", "C\n<protocol>result: back</protocol>");
+		expect(back.sections.session_protocol).toContain("<protocol>");
+		expect(back.draft?.fields?.result).toEqual(["back"]); // the section is back, no note needed
+		expect(h.switchNotes()).toEqual([]);
+	});
+
+	it("keeps prompt and withdrawal through a compaction while off", async () => {
+		await h.turn("first", "A\n<protocol>result: first</protocol>");
+		await h.commands.get("protokoll").handler("off", h.ctx);
+		const promptBefore = h.promptText();
+		const note = h.branch.find((e) => e.type === "custom_message")!;
+		addCompaction(h);
+		h.addUser("after the compaction");
+		const r = await h.settle({ role: "assistant", content: [{ type: "text", text: "B" }], stopReason: "stop" });
+		expect(r?.entries ?? []).toEqual([]); // the note still describes the state, so it stays
+		const offRun = await h.turn("next", "C");
+		expect(offRun.sections.session_protocol).toBe(promptBefore); // the carried prompt stays byte for byte
+		expect(h.promptText()).toBe(promptBefore);
+		expect(h.branch.filter((e) => e.type === "context_edit").length).toBe(0);
+		expect(note).toBeTruthy();
+	});
+
+	it("takes the section out of the prompt when its withdrawal was compacted away", async () => {
+		await h.turn("first", "A\n<protocol>result: first</protocol>");
+		await h.commands.get("protokoll").handler("off", h.ctx);
+		const note = h.branch.find((e) => e.type === "custom_message")!;
+		h.addUser("after the note");
+		addCompaction(h, h.branch[h.branch.indexOf(note) + 1]!.id); // the cut drops the note out of the context
+		const gone = await h.turn("next", "B");
+		expect(gone.sections.session_protocol).toBeUndefined(); // the rules leave the prompt instead
+	});
+
+	it("puts the section back into the rebuilt prompt after a compaction when switching on", async () => {
+		h = harness([], { enabled: false });
+		await h.fire("session_start", { reason: "startup" });
+		await h.turn("without protokoll", "A");
+		await h.commands.get("protokoll").handler("on", h.ctx);
+		addCompaction(h);
+		const r = await h.settle({ role: "assistant", content: [{ type: "text", text: "B" }], stopReason: "stop" });
+		expect(r?.entries.filter((e: any) => e.type === "context_edit")).toEqual([]); // the enabling note still fits
+		const back = await h.turn("rebuilt", "C\n<protocol>result: stored</protocol>");
+		expect(back.sections.session_protocol).toBeUndefined(); // the prefix still never had it
+		expect(back.draft?.fields?.result).toEqual(["stored"]);
+		expect(h.switchNotes().length).toBe(1); // and the note was not repeated
+	});
+
+	it("writes the rules note again when a compaction cut it away", async () => {
+		h = harness([], { enabled: false });
+		await h.fire("session_start", { reason: "startup" });
+		await h.turn("without protokoll", "A");
+		await h.commands.get("protokoll").handler("on", h.ctx);
+		const note = h.branch.find((e) => e.type === "custom_message")!;
+		h.addUser("after the note");
+		addCompaction(h, h.branch[h.branch.indexOf(note) + 1]!.id); // the note falls out of the context
+		await h.turn("next", "B\n<protocol>result: stored</protocol>");
+		expect(h.switchNotes().length).toBe(2); // one new note with the rules, the old one is gone from the context
+		expect(String(h.switchNotes().at(-1))).toContain("The following protocol rules apply");
 	});
 
 	// ------------------------------------------------------------------ v3
@@ -403,10 +627,9 @@ describe("protokoll extension", () => {
 		const req = h.requests[0];
 		expect(req.context.messages[0]).toEqual({ role: "system", content: "S" }); // same prefix as the last request
 		expect(req.context.messages.at(-1).content).toContain("interrupted");
-		const entry = h.branch.at(-1);
-		expect(entry?.customType).toBe("protokoll");
-		expect((entry?.data as ProtocolEntryData).source).toBe("backfill");
-		expect((entry?.data as ProtocolEntryData).turn).toBe(2);
+		const entry = h.lastProtocol();
+		expect(entry?.source).toBe("backfill");
+		expect(entry?.turn).toBe(2);
 		expect(h.widgets.some((w) => w?.some((l) => l.includes("turn 2 was interrupted")))).toBe(true);
 		expect(h.widgets.at(-1)).toBeUndefined(); // cleared
 		// nothing to do the next time
@@ -425,7 +648,7 @@ describe("protokoll extension", () => {
 		};
 		interrupted(h, "do it");
 		await h.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
-		expect((h.branch.at(-1)?.data as ProtocolEntryData).source).toBe("missing");
+		expect(h.lastProtocol()?.source).toBe("missing");
 	});
 
 	it("asks only once when the backfill of an interrupted turn fails", async () => {
@@ -433,7 +656,7 @@ describe("protokoll extension", () => {
 		await h.fire("session_start", { reason: "startup" });
 		interrupted(h, "do it");
 		await h.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
-		expect((h.branch.at(-1)?.data as ProtocolEntryData).source).toBe("missing");
+		expect(h.lastProtocol()?.source).toBe("missing");
 		expect(h.requests.length).toBe(2); // with the chat context, then from the transcript
 		expect(h.notes.at(-1)).toContain("the answer contained no block");
 		await h.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
@@ -465,7 +688,7 @@ describe("protokoll extension", () => {
 		expect(result.role).toBe("toolResult");
 		expect(result.toolCallId).toBe("t1");
 		expect(result.content[0].text).toContain("not available");
-		expect((h.branch.at(-1)?.data as ProtocolEntryData).fields?.result).toEqual(["batch half done"]);
+		expect(h.lastProtocol()?.fields?.result).toEqual(["batch half done"]);
 	});
 
 	it("falls back to the transcript when the request with the chat context fails", async () => {
@@ -474,9 +697,9 @@ describe("protokoll extension", () => {
 		interrupted(h, "do it");
 		await h.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
 		expect(h.requests[1].context.messages[0].content).toContain("transcript of turn 1");
-		const d = h.branch.at(-1)?.data as ProtocolEntryData;
-		expect(d.source).toBe("backfill");
-		expect(d.fields?.result).toEqual(["from transcript"]);
+		const d = h.lastProtocol();
+		expect(d?.source).toBe("backfill");
+		expect(d?.fields?.result).toEqual(["from transcript"]);
 	});
 
 	it("leaves a finished turn alone when the session continues", async () => {

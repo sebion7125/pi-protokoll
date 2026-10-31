@@ -35,7 +35,8 @@ gehören zum laufenden Zug.
 
 1. **Systemprompt.** Ein fester Abschnitt bittet das Modell, jede abschließende Antwort mit
    einem `<protocol>`-Block zu beenden: `result`, `decision`, `files`, `open`, `rule`, `revoke`,
-   `index`, `tags`. Der Text ändert sich nie, damit der Präfix-Cache des Servers gültig bleibt.
+   `index`, `tags`. Der Text ändert sich nie, damit der Präfix-Cache des Servers gültig bleibt. Er
+   sagt einmal, was das Modell über die Länge einer Sitzung wissen kann (siehe *Bekannte Grenzen*).
 2. **Antwort fertig.** Der Block wird aus der Antwort geschnitten und als Sitzungseintrag
    gespeichert, eingeklappt angezeigt (`▸ protocol turn 7: …`). Steht der Block früh, bleibt der
    Text danach in der Antwort; ein in Code oder im Satz zitiertes Tag wird nicht angefasst. Die
@@ -78,6 +79,22 @@ gehören zum laufenden Zug.
    - `protocol_read("12, 40-44")` liefert die gespeicherten Protokolle samt deiner Nachricht,
    - `protocol_search(query)` findet Züge über Stichwörter (Tags zählen doppelt),
    - `protocol_turn(n)` liefert das Originaltranskript eines Zugs.
+
+7. **Umschalten mitten in der Sitzung.** `/protokoll off` lässt Systemprompt und Werkzeugliste
+   byte-genau unverändert und fügt an der aktuellen Position eine Nachricht ein, die die Regeln
+   zurücknimmt; die drei `protocol_*`-Werkzeuge bleiben angemeldet und antworten
+   `pi-protokoll is disabled`. Genau das hält den Präfix-Cache. `/protokoll on` setzt es wieder in
+   Kraft: Der Abschnitt steht noch im Prompt, deshalb bringt ihn eine kurze Nachricht zurück. Eine
+   Sitzung, die von Anfang an ohne pi-protokoll lief, hatte den Abschnitt nie im Präfix – auch beim
+   Einschalten kommt er nicht in den Präfix, sondern einmalig als Nachricht mit den Regeln. Ältere
+   Züge haben keine Protokolle und werden als gekürzte Transkripte kompaktiert; `/protokoll repair`
+   schreibt ihre Protokolle. Die harte Variante `/protokoll off --strip` entfernt den Abschnitt
+   wirklich und meldet die Werkzeuge ab; die nächste Anfrage verarbeitet den ganzen Kontext neu
+   (einmalig). Pi kopiert die Systemnachricht des Zweigs auf den Compacting-Eintrag, daher überlebt
+   der Prompt (Abschnitt inklusive) ein Compacting, während eine Nachricht weggeschnitten werden
+   kann. Am ersten Abschluss nach einem Compacting nimmt die Erweiterung Nachrichten aus dem
+   Kontext, die dem Zustand widersprechen (`context_edit` mit leerem Ersatz); fehlt eine nötige
+   Zurücknahme, verlässt stattdessen der Abschnitt den Prompt.
 
 Während des Compactings und der Nachträge zeigt ein Widget über dem Eingabefeld den
 Fortschritt. Danach zeigt es die neue Kontextgröße, bis zur nächsten Nachricht, weil Pi den
@@ -131,7 +148,8 @@ löschen, sonst lädt die Erweiterung doppelt. `protokoll.json` und alle Sitzung
 | `/protokoll show` | Vorschau der Zusammenfassung (ohne Modellaufruf) |
 | `/protokoll export [datei]` | dasselbe als Markdown-Datei, mit Diagnoseteil: wirksame Konfiguration, alle Compactings, gespeicherter Stand mit geprüften Vorgaben, Tabelle aller Züge, alle Protokolle vollständig |
 | `/protokoll pin N` / `unpin N` | Zug N beim Compacting im vollen Text behalten |
-| `/protokoll on` / `off` | für diese Sitzung ein- oder ausschalten |
+| `/protokoll on` / `off` | für diese Sitzung ein- oder ausschalten. `off` lässt Prompt und Werkzeugliste byte-genau gleich und nimmt die Regeln mit einer Nachricht zurück (Präfix-Cache bleibt); die Protokollwerkzeuge antworten `pi-protokoll is disabled` |
+| `/protokoll off --strip` | hartes Aus: Der Abschnitt verlässt den Systemprompt und die Protokollwerkzeuge werden abgemeldet – die nächste Anfrage verarbeitet den ganzen Kontext neu (einmalig). Eine Zurücknahme ist nicht nötig |
 | `/protokoll reload` | `protokoll.json` neu einlesen |
 | `/protokoll rebuild` | beim nächsten Compacting den Stand aus allen Protokollen neu aufbauen statt fortschreiben |
 | `/protokoll repair` | ältere Sitzung auf den aktuellen Stand bringen: fehlende Protokolle aus dem Transkript, fehlende `index`/`tags` nachtragen (8 Züge pro Anfrage), danach Compacting mit Neuaufbau. Ersetzt nie, was das Modell selbst geschrieben hat; ein erneuter Aufruf setzt fort |
@@ -172,6 +190,21 @@ npm run e2e     # echtes Pi aus node_modules + Platzhalter-Modell: Installation,
 
 - Das Modell muss den Block schreiben. Qwen3.x vergisst ihn bei etwa der Hälfte der langen
   Züge mit vielen Werkzeugaufrufen; die Nachforderung behebt das in wenigen Sekunden.
+- Das Modell sieht seinen Kontextfüllstand nicht, erfindet aber gelegentlich einen („Context left: 12 %“, 
+  „Context exhausted“) und rät zu einem neuen Chat. Weder Pi noch diese Erweiterung noch ein
+  installiertes Paket geben solche Zeilen aus – die Zahlen waren erfunden. Der Systemprompt-Anhang
+  sagt die Fakten: Ohne einen in diesem Zug genannten Füllstand sagt das Modell nichts über das
+  Fenster und schlägt einen neuen Chat nur bei einem konkreten, belegbaren Grund vor – die
+  Entscheidung trifft der Nutzer. Das dämpft; gemessen ist es noch nicht. Der Text bleibt ab jetzt
+  unverändert, damit der Präfix-Cache gültig bleibt.
+- Ob ein Modell eine Zurücknahme am Ende eines langen Verlaufs befolgt, ist modellabhängig. Schreibt
+  es nach `/protokoll off` weiter Protokollblöcke, nutze `/protokoll off --strip`.
+- Die Kontextregel setzt voraus, dass pi-protokoll das Compacting übernimmt. Mit anderen
+  Compacting-Erweiterungen ist sie ungetestet. Einen Füllstand, den eine andere Erweiterung im
+  aktuellen Zug mitteilt, hebt sie bewusst nicht auf – so eine Zahl ist Information, die das Modell
+  nutzen darf.
+- Ein weiches `/protokoll off` lässt die drei Protokollwerkzeuge angemeldet, weil die Werkzeugliste
+  Teil des Präfix ist. Das Modell kann sie also weiter aufrufen und erhält `pi-protokoll is disabled`.
 - `/compact <Anweisung>` wird noch nicht an die Zustandsbeschreibung weitergegeben.
 - Die Zustandsbeschreibung ist der einzige vom Modell neu geschriebene Teil und kann driften;
   Index, Listen und gespeicherte Protokolle nicht. `/protokoll rebuild` baut sie neu auf.

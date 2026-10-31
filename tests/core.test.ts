@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	activeRules,
+	backfillPrompt,
 	buildIndex,
 	COMPACT_ENTRY,
 	type CompactEntryData,
@@ -15,16 +16,22 @@ import {
 	compactDuration,
 	compactStatusLine,
 	currentOpenItems,
+	currentSections,
 	DEFAULT_CONFIG,
+	DISABLED_NOTE,
 	decodeRanges,
 	diagnosticAppendix,
+	ENABLED_NOTE,
+	editedAway,
 	encodeRanges,
 	extractBlock,
 	type FoldState,
 	foldInputs,
 	hasProtocolKeys,
+	hasSystemMessage,
 	hideBlocks,
 	isUnsupportedModelCall,
+	LONG_CHAT_NOTE,
 	loadConfig,
 	mergeConfig,
 	narrativeBudget,
@@ -41,10 +48,18 @@ import {
 	renderSummary,
 	renumberLegacyState,
 	reviewIsSubset,
+	STATE_ENTRY,
 	SUPPLEMENT_ENTRY,
+	SWITCH_MESSAGE,
 	searchTurns,
+	sectionKnownToBranch,
+	sessionEnabled,
+	sessionState,
 	splitList,
+	staleSwitchEntries,
 	supplementPrompt,
+	switchEntries,
+	switchNoteSeen,
 	systemPromptSection,
 	tok,
 	toolCallFiles,
@@ -888,6 +903,105 @@ describe("index of older turns", () => {
 		expect(f?.index).toEqual(["palette wald chosen"]);
 		expect(f?.tags).toEqual(["Blattfarbe, DEMO_LEAFPAL"]);
 		expect(systemPromptSection(DEFAULT_CONFIG)).toContain("tags: 3-6 search terms");
+	});
+
+	it("states the facts about context length instead of leaving them to guesswork", () => {
+		expect(LONG_CHAT_NOTE).toContain("you have no information about");
+		expect(LONG_CHAT_NOTE).toContain("never state or estimate a fill level");
+		expect(LONG_CHAT_NOTE).toContain("Suggest a fresh session only if the");
+		// the note belongs to the chat prompt, not to the requests that only ask for a block
+		expect(backfillPrompt(DEFAULT_CONFIG, 3, "User: x")).not.toContain(LONG_CHAT_NOTE);
+	});
+
+	it("knows which sections the model has, and which switch notes it still sees", () => {
+		const head = { role: "system", content: "S" };
+		const withSection = { role: "system", content: "", sections: { session_protocol: "RULES" } };
+		const removed = { role: "system", content: "", sections: { session_protocol: null } };
+		const on = { role: "custom", customType: SWITCH_MESSAGE, content: ENABLED_NOTE, details: { enabled: true } };
+		const off = { role: "custom", customType: SWITCH_MESSAGE, content: DISABLED_NOTE, details: { enabled: false } };
+
+		expect(hasSystemMessage([head])).toBe(true);
+		expect(hasSystemMessage([])).toBe(false);
+		expect(currentSections([head, withSection])).toEqual({ session_protocol: "RULES" });
+		expect(currentSections([head, withSection, removed])).toEqual({});
+		expect(switchNoteSeen([withSection, on], true)).toBe(true);
+		expect(switchNoteSeen([withSection, on], false)).toBe(false);
+		expect(switchNoteSeen([withSection, on, off], false)).toBe(true);
+	});
+
+	it("keeps the switch state of the session, including the hard variant", () => {
+		const branch: PlainEntry[] = [
+			{ id: "c1", type: "custom", customType: STATE_ENTRY, data: { enabled: false } },
+			{ id: "c2", type: "custom", customType: STATE_ENTRY, data: { enabled: true } },
+		];
+		expect(sessionState(branch, true)).toEqual({ enabled: true, strip: false });
+		branch.push({ id: "c3", type: "custom", customType: STATE_ENTRY, data: { enabled: false, strip: true } });
+		expect(sessionState(branch, true)).toEqual({ enabled: false, strip: true });
+		expect(sessionEnabled(branch, true)).toBe(false);
+		// an older soft off never leaks a strip into a later state
+		branch.push({ id: "c4", type: "custom", customType: STATE_ENTRY, data: { enabled: false } });
+		expect(sessionState(branch, true)).toEqual({ enabled: false, strip: false });
+	});
+
+	it("drops only the switch notes that contradict the state after a compaction", () => {
+		const off = {
+			id: "m1",
+			type: "custom_message",
+			customType: SWITCH_MESSAGE,
+			content: DISABLED_NOTE,
+			details: { enabled: false },
+		};
+		const on = {
+			id: "m2",
+			type: "custom_message",
+			customType: SWITCH_MESSAGE,
+			content: ENABLED_NOTE,
+			details: { enabled: true },
+		};
+		const branch: PlainEntry[] = [
+			{ id: "u1", type: "message", message: { role: "user", content: "q" } },
+			off,
+			{ id: "u2", type: "message", message: { role: "user", content: "q2" } },
+			on,
+		];
+		expect(staleSwitchEntries(branch, { enabled: false, strip: false })).toEqual([]); // no compaction yet
+
+		branch.push({ id: "cmp", type: "compaction", firstKeptEntryId: "u2", summary: "s" });
+		expect(switchEntries(branch)).toEqual([
+			{ id: "m1", index: 1, on: false },
+			{ id: "m2", index: 3, on: true },
+		]);
+		// soft off: the withdrawal still matches the section the prompt kept, the enabling note contradicts it
+		expect(staleSwitchEntries(branch, { enabled: false, strip: false })).toEqual(["m2"]);
+		// on: the section applies again, so the withdrawal is what contradicts
+		expect(staleSwitchEntries(branch, { enabled: true, strip: false })).toEqual(["m1"]);
+		// hard off: the rules are out of the prompt, so no note is needed at all
+		expect(staleSwitchEntries(branch, { enabled: false, strip: true })).toEqual(["m1", "m2"]);
+
+		branch.push({ id: "e1", type: "context_edit", targetId: "m1", replacement: null });
+		expect(editedAway(branch)).toEqual(new Set(["m1"]));
+		expect(staleSwitchEntries(branch, { enabled: true, strip: false })).toEqual([]); // stays done, no repeated edit
+
+		// a note after the compaction describes the current state and is never touched
+		branch.push({
+			id: "m3",
+			type: "custom_message",
+			customType: SWITCH_MESSAGE,
+			content: DISABLED_NOTE,
+			details: { enabled: false },
+		});
+		expect(staleSwitchEntries(branch, { enabled: true, strip: false })).toEqual([]);
+	});
+
+	it("knows that a removed section was once in the prompt", () => {
+		const branch: PlainEntry[] = [
+			{ id: "s1", type: "message", message: { role: "system", content: "S" } },
+			{ id: "s2", type: "message", message: { role: "system", content: "", sections: { session_protocol: "R" } } },
+			{ id: "s3", type: "message", message: { role: "system", content: "", sections: { session_protocol: null } } },
+		];
+		expect(sectionKnownToBranch(branch, "session_protocol")).toBe(true);
+		expect(sectionKnownToBranch(branch.slice(0, 1), "session_protocol")).toBe(false);
+		expect(sectionKnownToBranch([], "session_protocol")).toBe(false);
 	});
 
 	it("reads durations the way a user counts them", () => {

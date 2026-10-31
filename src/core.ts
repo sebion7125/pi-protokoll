@@ -285,6 +285,23 @@ export function systemPromptSection(config: ProtocolConfig): string {
 	].join("\n");
 }
 
+/**
+ * Fixed text about the length of a session. The model has no readout of its context fill level and
+ * invents one now and then, which leads to advice to start a fresh chat. States the facts and the
+ * allowed behaviour instead of forbidding a hallucination. Part of the chat's system prompt, so the
+ * text must not change once released (prefix cache); requests that only ask for a block leave it out.
+ */
+export const LONG_CHAT_NOTE = [
+	"Context: Unless this turn explicitly gives you a fill level or a session",
+	"recommendation from the harness or an extension, you have no information about",
+	"how full your context is. In that case never state or estimate a fill level,",
+	"never claim you were told to start a new session, and never stop work for that",
+	"reason. Older turns are compacted automatically from the protocol blocks, so",
+	"this session can run almost indefinitely. Suggest a fresh session only if the",
+	"user asks or you can name a concrete, verifiable reason (e.g. the same error",
+	"recurring after repeated corrections) — the user decides.",
+].join("\n");
+
 export const FOLLOW_UP_PROMPT = (tag: string) =>
 	`Your previous answer did not end with the <${tag}> block. Write only that block for the turn above, exactly as the system prompt describes. Output nothing else.`;
 
@@ -518,6 +535,13 @@ export interface PlainEntry {
 	tokensBefore?: number;
 	timestamp?: string;
 	details?: unknown;
+	/** custom_message: the text the model sees. */
+	content?: unknown;
+	/** context_edit: the entry it rewrites, and the new content (null omits the target from the context). */
+	targetId?: string;
+	replacement?: unknown;
+	/** compaction: the system message Pi carries over, so the prompt outlives the cut. */
+	systemMessage?: PlainMessage;
 }
 
 export interface PlainMessage {
@@ -526,6 +550,8 @@ export interface PlainMessage {
 	toolName?: string;
 	stopReason?: string;
 	errorMessage?: string;
+	/** system message: single sections the prompt was patched with (null removes one) */
+	sections?: Record<string, string | null>;
 }
 
 export const PROTOCOL_ENTRY = "protokoll";
@@ -681,6 +707,12 @@ export interface PinEntryData {
 
 export interface StateEntryData {
 	enabled: boolean;
+	/**
+	 * Hard off (`/protokoll off --strip`): the section really leaves the system prompt and the
+	 * tools are unregistered. Without it the prompt and the tool list stay exactly as they are and
+	 * a note in the transcript withdraws the rules, which keeps the prefix cache valid.
+	 */
+	strip?: boolean;
 }
 
 /**
@@ -833,13 +865,128 @@ export function turnUserText(entries: PlainEntry[], maxChars = Infinity, note = 
 }
 
 export function sessionEnabled(branch: PlainEntry[], fallback: boolean): boolean {
+	return sessionState(branch, fallback).enabled;
+}
+
+/** How the last `/protokoll on|off` on this branch left the session. */
+export function sessionState(branch: PlainEntry[], fallback: boolean): { enabled: boolean; strip: boolean } {
 	let enabled = fallback;
+	let strip = false;
 	for (const e of branch) {
 		if (e.type === "custom" && e.customType === STATE_ENTRY && e.data && typeof e.data === "object") {
-			enabled = (e.data as StateEntryData).enabled !== false;
+			const d = e.data as StateEntryData;
+			enabled = d.enabled !== false;
+			strip = d.strip === true && !enabled;
 		}
 	}
-	return enabled;
+	return { enabled, strip };
+}
+
+// ----------------------------------------------------------------------------
+// Switching on and off inside a session
+// ----------------------------------------------------------------------------
+
+/** Custom message type of the notes inserted when the protocol is switched on or off. */
+export const SWITCH_MESSAGE = "protokoll-switch";
+
+/** Withdraws the protocol rules where the system prompt keeps them (soft off). */
+export const DISABLED_NOTE =
+	"[pi-protokoll disabled] Ignore the protocol section of the system prompt from here on: " +
+	"do not write protocol blocks; the protocol tools are unavailable; older turns are no longer compacted from protocols.";
+
+/** Refers back to the section, which is still in the system prompt. */
+export const ENABLED_NOTE = "[pi-protokoll enabled] The protocol section of the system prompt applies again.";
+
+/** The session ran without the section, so the rules come as a message instead of into the prefix. */
+export const enabledRulesNote = (section: string): string =>
+	`[pi-protokoll enabled] The following protocol rules apply from here on:\n${section}`;
+
+/** The system messages the model currently has, with their sections applied in order. */
+export interface ProjectedMessage {
+	role: string;
+	customType?: string;
+	content?: unknown;
+	details?: unknown;
+	sections?: Record<string, string | null> | null;
+}
+
+/**
+ * Sections the model currently has: every later system message patches single sections, and a null
+ * value removes one. That is how Pi keeps the prompt a transcript delta instead of a new head.
+ */
+export function currentSections(messages: ProjectedMessage[]): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const m of messages) {
+		if (m.role !== "system" || !m.sections) continue;
+		for (const [name, value] of Object.entries(m.sections)) {
+			if (value === null) delete out[name];
+			else out[name] = value;
+		}
+	}
+	return out;
+}
+
+/** Whether the context the model has carries a system message at all (false right after a compaction). */
+export function hasSystemMessage(messages: ProjectedMessage[]): boolean {
+	return messages.some((m) => m.role === "system");
+}
+
+/** A switch note the model still sees: true for an enabling note, false for a withdrawing one. */
+export function switchNoteSeen(messages: ProjectedMessage[], on: boolean): boolean {
+	return messages.some(
+		(m) =>
+			m.role === "custom" && m.customType === SWITCH_MESSAGE && (m.details as { enabled?: boolean })?.enabled === on,
+	);
+}
+
+/** Notes about switching in the branch, with their position and the state they announce. */
+export function switchEntries(branch: PlainEntry[]): { id: string; index: number; on: boolean }[] {
+	const out: { id: string; index: number; on: boolean }[] = [];
+	for (let i = 0; i < branch.length; i++) {
+		const e = branch[i];
+		if (e.type !== "custom_message" || e.customType !== SWITCH_MESSAGE) continue;
+		out.push({ id: e.id, index: i, on: (e.details as { enabled?: boolean })?.enabled === true });
+	}
+	return out;
+}
+
+/** Entries a `context_edit` with a null replacement took out of the model context. */
+export function editedAway(branch: PlainEntry[]): Set<string> {
+	const gone = new Set<string>();
+	for (const e of branch) {
+		if (e.type === "context_edit" && e.replacement === null && typeof e.targetId === "string") gone.add(e.targetId);
+	}
+	return gone;
+}
+
+/** Whether a system message of this branch once put this section into the prompt (so it was only removed temporarily). */
+export function sectionKnownToBranch(branch: PlainEntry[], name: string): boolean {
+	for (const e of branch) {
+		if (e.type !== "message" || e.message?.role !== "system") continue;
+		const value = (e.message as { sections?: Record<string, string | null> }).sections?.[name];
+		if (value !== undefined && value !== null) return true;
+	}
+	return false;
+}
+
+/**
+ * Switch notes that contradict the state after a compaction. Pi copies the system message of the
+ * branch onto the compaction entry, so the prompt (section included) survives a compaction while a
+ * note can be cut away by it. Notes that still describe the state stay; ones that contradict it are
+ * taken out of the context with an edit – the compaction broke the cache anyway.
+ */
+export function staleSwitchEntries(branch: PlainEntry[], state: { enabled: boolean; strip: boolean }): string[] {
+	let compaction = -1;
+	for (let i = 0; i < branch.length; i++) if (branch[i].type === "compaction") compaction = i;
+	if (compaction < 0) return [];
+	const gone = editedAway(branch);
+	return (
+		switchEntries(branch)
+			.filter((s) => s.index < compaction && !gone.has(s.id))
+			// hard off needs no note at all; otherwise keep the one that matches the state, drop its opposite
+			.filter((s) => (state.strip ? true : state.enabled ? !s.on : s.on))
+			.map((s) => s.id)
+	);
 }
 
 // ============================================================================

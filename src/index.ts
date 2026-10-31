@@ -48,9 +48,13 @@ import {
 	consolidationPrompt,
 	contentText,
 	currentOpenItems,
+	currentSections,
 	DEFAULT_CONFIG,
+	DISABLED_NOTE,
 	decodeRanges,
 	diagnosticAppendix,
+	ENABLED_NOTE,
+	enabledRulesNote,
 	encodeRanges,
 	extractBlock,
 	FOLLOW_UP_PROMPT,
@@ -58,10 +62,12 @@ import {
 	foldInputs,
 	foldPrompt,
 	hasProtocolKeys,
+	hasSystemMessage,
 	hideBlocks,
 	INTERRUPTED_PROMPT,
 	isNoneItem,
 	isUnsupportedModelCall,
+	LONG_CHAT_NOTE,
 	latestFoldState,
 	loadConfig,
 	narrativeBudget,
@@ -73,6 +79,7 @@ import {
 	PROTOCOL_ENTRY,
 	type ProgressEvent,
 	type ProgressStep,
+	type ProjectedMessage,
 	type ProtocolConfig,
 	type ProtocolEntryData,
 	type ProtocolFields,
@@ -90,11 +97,15 @@ import {
 	type StateEntryData,
 	SUPPLEMENT_ENTRY,
 	type SupplementEntryData,
+	SWITCH_MESSAGE,
 	searchTurns,
+	sectionKnownToBranch,
 	serializeTurn,
-	sessionEnabled,
+	sessionState,
 	shortenPrompt,
+	staleSwitchEntries,
 	supplementPrompt,
+	switchNoteSeen,
 	systemPromptSection,
 	type Turn,
 	tok,
@@ -453,6 +464,8 @@ export function forceThinkingLevel(payload: unknown, model: { api?: string }, le
 export default function protokoll(pi: ExtensionAPI) {
 	let config: ProtocolConfig = { ...DEFAULT_CONFIG };
 	let enabled = config.enabled;
+	/** Hard off (`/protokoll off --strip`): section and tools really go; soft off keeps both in place. */
+	let strip = false;
 	/** Block found in an answer of the current run, waiting for the end of the run. */
 	let pending = new Map<string, { fields: ProtocolFields; raw: string }>();
 	/** Reason of the last failed backfill, shown to the user. */
@@ -489,16 +502,29 @@ export default function protokoll(pi: ExtensionAPI) {
 		const loaded = loadConfig(getAgentDir(), ctx.cwd);
 		config = loaded.config;
 		for (const w of loaded.warnings) ctx.ui.notify(`protokoll: ${w}`, "warning");
-		enabled = sessionEnabled(plainBranch(ctx), config.enabled);
+		const state = sessionState(plainBranch(ctx), config.enabled);
+		enabled = state.enabled;
+		strip = state.strip;
 		syncTool();
 	};
 
-	/** The tools are declared to the model only while the protocol is on. */
+	/** The fixed text of the section. It must never change afterwards: every edit costs all running sessions their prefix cache once. */
+	const sectionText = () => `${systemPromptSection(config)}\n\n${LONG_CHAT_NOTE}`;
+
+	/** Sections the model currently has in its prompt. */
+	const projectedMessages = (ctx: ExtensionContext): ProjectedMessage[] =>
+		ctx.sessionManager.buildSessionProjection().messages as ProjectedMessage[];
+
+	/**
+	 * The tools stay declared while the protocol is on or softly off, so switching does not touch the
+	 * prompt; only `--strip` takes them out.
+	 */
 	const syncTool = () => {
+		const declared = enabled || !strip;
 		const want = new Map([
-			[TOOL_NAME, enabled && config.lookupTool],
-			[READ_TOOL, enabled && config.lookupTool],
-			[SEARCH_TOOL, enabled && config.searchTool],
+			[TOOL_NAME, declared && config.lookupTool],
+			[READ_TOOL, declared && config.lookupTool],
+			[SEARCH_TOOL, declared && config.searchTool],
 		]);
 		const active = pi.getActiveTools();
 		let next = active.filter((t) => want.get(t) !== false);
@@ -516,15 +542,44 @@ export default function protokoll(pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		pending = new Map();
 		// /tree can move to a branch where /protokoll on|off was set differently
-		const onBranch = sessionEnabled(plainBranch(ctx), config.enabled);
-		if (onBranch !== enabled) {
-			enabled = onBranch;
+		const state = sessionState(plainBranch(ctx), config.enabled);
+		if (state.enabled !== enabled || state.strip !== strip) {
+			enabled = state.enabled;
+			strip = state.strip;
 			syncTool();
 		}
 		showResult(ctx, undefined);
 		if (enabled && config.backfill) await backfillOnContinue(ctx);
-		if (enabled) event.systemPromptOptions.sections[SECTION_KEY] = systemPromptSection(config);
-		else delete event.systemPromptOptions.sections[SECTION_KEY];
+
+		const section = sectionText();
+		const projected = projectedMessages(ctx);
+		const inPrompt = currentSections(projected)[SECTION_KEY] !== undefined;
+		const head = hasSystemMessage(projected);
+		// a section the model already read once belongs back in the prompt; one it never had stays out
+		const known = sectionKnownToBranch(plainBranch(ctx), SECTION_KEY);
+		if (enabled) {
+			// The section is where the model can read it, the prompt is being built from scratch (first
+			// run of the session), or the model read it once and only lost it to a strip: put it in the prompt.
+			if (inPrompt || !head || known) event.systemPromptOptions.sections[SECTION_KEY] = section;
+			else {
+				// The session ran without the section. Keeping the prefix as it is matters more than
+				// having the rules in the prompt, so they come once as a message at this point.
+				delete event.systemPromptOptions.sections[SECTION_KEY];
+				if (!switchNoteSeen(projected, true))
+					return {
+						message: {
+							customType: SWITCH_MESSAGE,
+							content: enabledRulesNote(section),
+							display: true,
+							details: { enabled: true },
+						},
+					};
+			}
+		} else if (inPrompt && !strip && switchNoteSeen(projected, false)) {
+			// soft off: the prompt keeps the exact text the model already has (no patch, cache stays),
+			// which works only while the withdrawal is still in the context
+			event.systemPromptOptions.sections[SECTION_KEY] = section;
+		} else delete event.systemPromptOptions.sections[SECTION_KEY];
 	});
 
 	/** The previous turn stopped early and has no protocol: ask for it before the new prompt goes out. */
@@ -724,7 +779,14 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	// store the block, or ask for it once
 	pi.on("agent_before_settle", async (event, ctx) => {
-		if (!enabled) return;
+		// a compaction keeps the prompt (Pi copies the system message onto its entry) but can cut away a
+		// switch note, so notes that now contradict the state go out of the context here
+		const edits = staleSwitchEntries(plainBranch(ctx), { enabled, strip }).map((id) => ({
+			type: "context_edit" as const,
+			targetId: id,
+			replacement: null,
+		}));
+		if (!enabled) return edits.length ? { entries: [...event.entries, ...edits] } : undefined;
 		const branch = plainBranch(ctx);
 		const turns = collectTurns(branch);
 		const stored = collectProtocols(branch);
@@ -753,11 +815,12 @@ export default function protokoll(pi: ExtensionAPI) {
 					: { version: 1, userEntryId: turn.userEntryId, turn: turn.number, source: "missing" },
 			);
 		}
-		if (!drafts.length) return;
+		if (!drafts.length && !edits.length) return;
 		return {
 			entries: [
 				...event.entries,
 				...drafts.map((data) => ({ type: "custom" as const, customType: PROTOCOL_ENTRY, data })),
+				...edits,
 			],
 		};
 	});
@@ -1375,6 +1438,12 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------------ tool
 
+	/** Soft off keeps the tools declared, so they answer instead of reading the session. */
+	const disabledToolResult = () => ({
+		content: [{ type: "text" as const, text: "pi-protokoll is disabled" }],
+		details: { disabled: true },
+	});
+
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: "protokoll: read turn",
@@ -1384,6 +1453,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			turn: Type.Integer({ minimum: 1, description: "Turn number as shown in the session protocol" }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
+			if (!enabled) return disabledToolResult();
 			const turns = collectTurns(plainBranch(ctx));
 			const turn = turns[params.turn - 1];
 			if (!turn) throw new Error(`Turn ${params.turn} does not exist; this session has ${turns.length} turns.`);
@@ -1405,6 +1475,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			turns: Type.String({ description: 'Turn numbers and ranges, e.g. "12, 40-44"' }),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
+			if (!enabled) return disabledToolResult();
 			const branch = plainBranch(ctx);
 			const turns = collectTurns(branch);
 			const protocols = collectProtocols(branch);
@@ -1455,6 +1526,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum number of hits" })),
 		}),
 		async execute(_id, params, _signal, _onUpdate, ctx) {
+			if (!enabled) return disabledToolResult();
 			const max = Math.min(params.limit ?? config.searchMaxResults, config.searchMaxResults);
 			const hits = searchTurns(plainBranch(ctx), params.query, max);
 			if (!hits.length) {
@@ -1528,7 +1600,7 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	pi.registerCommand("protokoll", {
 		description:
-			"Session protocol: status | show | export [file] | pin N | unpin N | on | off | reload | rebuild | repair",
+			"Session protocol: status | show | export [file] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
 		getArgumentCompletions: (prefix) =>
 			SUB.filter((s) => s.startsWith(prefix.trim())).map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
@@ -1574,7 +1646,7 @@ export default function protokoll(pi: ExtensionAPI) {
 							(lastC?.tokensBefore ? ` at ${fmt(lastC.tokensBefore)} tokens` : "")
 						: " · not compacted yet";
 					ctx.ui.notify(
-						`protokoll ${enabled ? "on" : "off"} · ${turns.length} turns, ${written} with protocol` +
+						`protokoll ${enabled ? "on" : strip ? "off (section out of the prompt)" : "off (note withdraws it)"} · ${turns.length} turns, ${written} with protocol` +
 							` · pinned: ${pins.length ? pins.join(", ") : "none"}` +
 							` · compaction: ${config.compaction} · kept: ${config.keepRecentTurns} turns / ${config.keepRecentPercent} %` +
 							` · detail ≤ ${config.detailMaxTokens}, status ≤ ${config.statusMaxTokens} tokens` +
@@ -1627,10 +1699,71 @@ export default function protokoll(pi: ExtensionAPI) {
 				}
 				case "on":
 				case "off": {
-					enabled = sub === "on";
-					pi.appendEntry<StateEntryData>(STATE_ENTRY, { enabled });
+					const wantsStrip = sub === "off" && rest.some((a) => a === "--strip" || a === "-strip" || a === "strip");
+					const on = sub === "on";
+					if (enabled === on && (on || strip === wantsStrip)) {
+						ctx.ui.notify(
+							on
+								? "protokoll is already enabled"
+								: `protokoll is already disabled (${strip ? "section and tools are out of the prompt" : "the note withdraws the section, which stays"})`,
+							"info",
+						);
+						return;
+					}
+					enabled = on;
+					const wasStrip = strip;
+					strip = on ? false : wantsStrip;
+					pi.appendEntry<StateEntryData>(STATE_ENTRY, { enabled, ...(strip ? { strip: true } : {}) });
 					syncTool();
-					ctx.ui.notify(`protokoll ${enabled ? "enabled" : "disabled"} for this session`, "info");
+					const projected = projectedMessages(ctx);
+					const inPrompt = currentSections(projected)[SECTION_KEY] !== undefined;
+					if (!on) {
+						// the note is only needed while the model still reads the rules somewhere: in the prompt or from an enabling note
+						if (!strip && (inPrompt || switchNoteSeen(projected, true)))
+							pi.sendMessage(
+								{
+									customType: SWITCH_MESSAGE,
+									content: DISABLED_NOTE,
+									display: true,
+									details: { enabled: false },
+								},
+								{ triggerTurn: false },
+							);
+						ctx.ui.notify(
+							strip
+								? "protokoll disabled – the section leaves the system prompt and the protocol tools go with it, so the next request reads the whole context again (once)"
+								: 'protokoll disabled for this session – the system prompt keeps its exact text and a note withdraws it, so the prefix cache stays; the protocol tools answer "pi-protokoll is disabled"',
+							"info",
+						);
+						return;
+					}
+					// a session that never had the section keeps the prefix as it is and gets the rules as a message;
+					// with no system message in the context (just compacted) or after a strip the section goes into the prompt
+					if (hasSystemMessage(projected) && inPrompt)
+						pi.sendMessage(
+							{ customType: SWITCH_MESSAGE, content: ENABLED_NOTE, display: true, details: { enabled: true } },
+							{ triggerTurn: false },
+						);
+					else if (!wasStrip && hasSystemMessage(projected))
+						pi.sendMessage(
+							{
+								customType: SWITCH_MESSAGE,
+								content: enabledRulesNote(sectionText()),
+								display: true,
+								details: { enabled: true },
+							},
+							{ triggerTurn: false },
+						);
+					ctx.ui.notify(
+						`protokoll enabled for this session – ${
+							inPrompt
+								? "the section is still in the system prompt and a note brings it back"
+								: wasStrip
+									? "the section goes back into the system prompt, so the next request reads the whole context again (once)"
+									: "the section was never in the system prompt, so its rules come as a message and the prompt stays unchanged"
+						} · turns older than this have no protocol and are compacted as shortened transcripts; /protokoll repair writes theirs`,
+						"info",
+					);
 					return;
 				}
 				case "rebuild": {

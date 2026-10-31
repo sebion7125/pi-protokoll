@@ -32,7 +32,8 @@ Messages you send while the model is working belong to the running turn.
 
 1. **System prompt.** A fixed section asks the model to end every final answer with a
    `<protocol>` block: `result`, `decision`, `files`, `open`, `rule`, `revoke`, `index`, `tags`.
-   The text never changes, so the server's prefix cache stays valid.
+   The text never changes, so the server's prefix cache stays valid. It also states once what the
+   model can and cannot know about the length of a session (see *Known limits*).
 2. **Answer done.** The block is cut out of the answer and stored as a session entry, shown
    collapsed (`▸ protocol turn 7: …`). A block written early keeps the text after it in the answer;
    a tag quoted inside code or inside a sentence is left alone. The extension numbers the turns,
@@ -74,6 +75,21 @@ Messages you send while the model is working belong to the running turn.
    - `protocol_read("12, 40-44")` returns the full stored protocols plus your message,
    - `protocol_search(query)` finds turns by keywords (tags count double),
    - `protocol_turn(n)` returns the original transcript of one turn.
+
+7. **Switching inside a session.** `/protokoll off` leaves the system prompt and the tool list
+   byte-identical and inserts one message at the current position that withdraws the rules; the
+   three `protocol_*` tools stay declared and answer `pi-protokoll is disabled`. That is what keeps
+   the server's prefix cache. `/protokoll on` brings it back: the section is still in the prompt, so
+   a short note applies it again. A session that ran without protokoll from the start never had the
+   section in its prefix – enabling does not add it there either, it brings the rules once as a
+   message, so the prefix stays untouched. Older turns have no protocols and are compacted as
+   shortened transcripts; `/protokoll repair` writes theirs.
+   The hard variant `/protokoll off --strip` really removes the section and unregisters the tools;
+   the next request then reads the whole context again (once). Pi copies the system message of the
+   branch onto the compaction entry, so the prompt (section included) outlives a compaction while a
+   note can be cut away by it. At the first settle boundary after a compaction the extension retires
+   notes that now contradict the state (`context_edit` with an empty replacement); if a needed
+   withdrawal was cut away, the section leaves the prompt instead.
 
 Progress is shown above the editor during compaction and backfills. Afterwards a widget shows
 the new context size; it stays until the next message, because Pi redraws the chat after
@@ -130,7 +146,8 @@ otherwise the extension loads twice. Your `protokoll.json` and all session data 
 | `/protokoll show` | preview of the summary (no model call; turns not yet folded appear as single lines) |
 | `/protokoll export [file]` | the same as a Markdown file, plus a diagnostics part: effective configuration, all compactions, the stored state with reviewed rules, a table of all turns and all protocols in full |
 | `/protokoll pin N` / `unpin N` | keep turn N verbatim at compaction |
-| `/protokoll on` / `off` | enable or disable for this session |
+| `/protokoll on` / `off` | enable or disable for this session. `off` keeps prompt and tool list byte-identical and withdraws the rules with one message (prefix cache stays); the protocol tools answer `pi-protokoll is disabled` |
+| `/protokoll off --strip` | hard off: the section leaves the system prompt and the protocol tools are unregistered, so the next request reads the whole context again (once). Needs no withdrawal message |
 | `/protokoll reload` | reread `protokoll.json` |
 | `/protokoll rebuild` | rebuild the state of work from all protocols at the next compaction instead of updating it (against drift; takes longer) |
 | `/protokoll repair` | bring an older session up to date: turns without protocol get one from their transcript, protocols without `index`/`tags` get both (8 turns per request), then compacts with a rebuild. Never replaces what the model wrote itself; running it again continues where it stopped |
@@ -214,6 +231,20 @@ scripted model. They check the wiring and the pure logic, not Pi itself.
 
 - The model must write the block. Qwen3.x forgets it in roughly half of the long tool-heavy
   turns; the follow-up request fixes that at the cost of a few seconds.
+- The model cannot see how full its context window is, yet occasionally invents a fill level
+  (`Context left: 12 %`, `Context exhausted`) and advises a fresh chat. Nothing in Pi, in this
+  extension or in any installed package prints such lines – the numbers are made up. The system
+  prompt section states the facts instead: without a fill level given in the current turn the model
+  says nothing about the window, and it suggests a fresh session only on a concrete verifiable
+  reason. This softens it; measured effect: none yet. The text is fixed from here on so the
+  prefix cache stays valid.
+- Whether a model follows a withdrawal note at the end of a long transcript is model-dependent. If
+  it keeps writing protocol blocks after `/protokoll off`, use `/protokoll off --strip`.
+- The context rule assumes pi-protokoll does the compaction. With other compaction extensions it is
+  untested. A fill level another extension hands over in the current turn is deliberately not
+  denied – such a number is information the model may use.
+- A soft `/protokoll off` keeps the three protocol tools declared, because the tool list is part of
+  the prefix. A model can still call them and gets `pi-protokoll is disabled` back.
 - `/compact <instructions>` is not yet passed on to the state of work.
 - The state of work is the one part the model rewrites, so it can drift; the index, the lists
   and the stored protocols cannot. `/protokoll rebuild` rebuilds it from scratch.

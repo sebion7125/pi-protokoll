@@ -30,7 +30,10 @@ run() {
 }
 filler="$(printf 'lorem ipsum dolor %.0s' {1..500})"
 run "question 1 $filler"
-for i in $(seq 2 9); do run --continue "question $i $filler"; done
+for i in $(seq 2 8); do run --continue "question $i $filler"; done
+# switching inside a session: the withdrawal goes in as a message, the prompt keeps its text
+run --continue "/protokoll off"
+run --continue "question 9 $filler"
 
 session="$(ls -t "$TMP"/agent/sessions/*/*.jsonl | head -1)"
 grep -q '"customType":"protokoll"' "$session" || { echo "FAIL: no protocol entries" >&2; exit 1; }
@@ -39,4 +42,20 @@ grep -q '"durationMs":[0-9]' "$session" || { echo "FAIL: compaction status witho
 own="$(grep -c '"protokoll":true' "$session" || true)"
 [[ "$own" -ge 1 ]] || { echo "FAIL: no compaction written by the extension" >&2; exit 1; }
 grep -q "session_protocol" "$TMP/requests.log" || { echo "FAIL: system prompt section missing" >&2; exit 1; }
-echo "OK: Pi $("$PI" --version) – $own compaction(s) written by the extension"
+grep -q "how full your context is" "$TMP/requests.log" || { echo "FAIL: note about session length missing" >&2; exit 1; }
+grep -q '"customType":"protokoll-switch"' "$session" || { echo "FAIL: no message about the switch" >&2; exit 1; }
+# the last chat request still carries the section in its prompt, and the withdrawal in its transcript
+node -e '
+	const fs = require("node:fs");
+	const lines = fs.readFileSync(process.argv[1], "utf8").trim().split("\n").map((l) => JSON.parse(l));
+	const chats = lines.filter((l) => (l.tools || []).some((t) => t.function && t.function.name === "protocol_turn"));
+	const last = chats[chats.length - 1];
+	const head = last && last.messages[0] && last.messages[0].role === "system" ? last.messages[0].content : "";
+	const kept = head.includes("<session_protocol>");
+	const delivered = JSON.stringify(last).includes("pi-protokoll disabled");
+	if (!kept || !delivered) {
+		console.error(`FAIL: soft off changed the prompt (section kept: ${kept}) or the withdrawal never reached the model (${delivered})`);
+		process.exit(1);
+	}
+' "$TMP/requests.log" || exit 1
+echo "OK: Pi $("$PI" --version) – $own compaction(s) written by the extension, switch note delivered without touching the prompt"

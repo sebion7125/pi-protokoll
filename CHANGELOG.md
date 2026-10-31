@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.7 – 2026-10-31
+
+- The system prompt section carries a fixed note about the length of a session. Models, Qwen3.x among them, sometimes invent a context fill level (`Context left: 12 %`, `Context exhausted`) and advise a fresh chat; nothing in Pi, in this extension or in any installed package prints such lines. The note states the facts instead of forbidding the guess: without a fill level given in the current turn the model has no information about the window, so it states none, never claims it was told to start a new session, and suggests a fresh session only on a concrete, verifiable reason – the user decides. The text is fixed from now on, so the prefix cache is invalidated once.
+- **Switching inside a session keeps the prefix.** `/protokoll off` no longer removes the section or the tools: prompt and tool list stay byte for byte and one message at the current position withdraws the rules (`[pi-protokoll disabled] …`). The three `protocol_*` tools stay declared and answer `pi-protokoll is disabled`. `/protokoll on` re-applies with a short note, once per change, not per command.
+- **A session that ran without the section keeps it out of the prefix.** Enabling brings the full rules once as a message (`[pi-protokoll enabled] The following protocol rules apply from here on:`) instead of patching the prompt; the status points at `/protokoll repair` for the older turns without protocols.
+- **Escape hatch `/protokoll off --strip`**: the section really leaves the system prompt and the tools are unregistered, no withdrawal text is inserted, and the status says that the next request reads the whole context again (once). `/protokoll on` puts both back, with the same notice. The mode survives restarts (stored in the session state entry).
+- **After a compaction the prompt matches the state.** Pi copies the branch's system message onto the compaction entry, so the section outlives the cut while a note can be cut away. At the first settle boundary after a compaction the extension retires notes that contradict the state (`context_edit` with an empty replacement); when a needed withdrawal was cut away, the section leaves the prompt instead of leaving the model with rules nobody withdrew.
+- README (de and en) documents both switch modes and the open points: following a withdrawal is model-dependent, the context rule assumes pi-protokoll does the compaction, and a fill level another extension hands over in the current turn is deliberately not denied.
+
 ## 0.9.6 – 2026-10-29
 
 - Where the block is looked for is now decided deliberately instead of by guesswork, so an answer that quotes the tag no longer loses its text:
