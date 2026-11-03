@@ -48,6 +48,12 @@ export interface ProtocolConfig {
 	compaction: "protocol" | "default";
 	/** Let the model tidy rules and open items once per compaction (the turn log is never rewritten). */
 	consolidate: boolean;
+	/**
+	 * Keep the state of work: a text the model rewrites at every compaction to cover the turns that leave
+	 * the detail tier. false: no such text and no fold requests; the index gets the status budget the text
+	 * would have had, and what is older stays reachable through the index and the lookup tools.
+	 */
+	stateOfWork: boolean;
 	/** Keep at most this many of the latest turns in full. */
 	keepRecentTurns: number;
 	/** …and at most this share of the context window (percent). The smaller limit wins. */
@@ -98,6 +104,7 @@ export const DEFAULT_CONFIG: ProtocolConfig = {
 	auxiliaryModel: "",
 	compaction: "protocol",
 	consolidate: true,
+	stateOfWork: true,
 	keepRecentTurns: 3,
 	keepRecentPercent: 10,
 	keepUserMessages: true,
@@ -1754,6 +1761,40 @@ export function narrativeBudget(
 	return Math.max(Math.floor(budget * 0.2), budget - used);
 }
 
+/**
+ * Room for the index in tokens. With the state of work it keeps its share of 35 %. Without it the
+ * index takes what rules, open items and files leave of the status budget (each at most its own
+ * share), so it can keep single lines for more turns before older ones are grouped.
+ */
+export function indexBudget(
+	config: ProtocolConfig,
+	parts: { rules: string[]; open: string[]; files: { path: string; turn: number }[] },
+): number {
+	const budget = config.statusMaxTokens;
+	const share = Math.floor(budget * 0.35);
+	if (config.stateOfWork) return share;
+	const cost = (lines: string[], part: number) =>
+		Math.min(
+			Math.floor(budget * part),
+			lines.reduce((sum, l) => sum + tok(l) + 1, 0),
+		);
+	const used =
+		cost(
+			parts.rules.map((r) => `- ${r}`),
+			0.25,
+		) +
+		cost(
+			parts.open.map((o) => `- ${o}`),
+			0.15,
+		) +
+		cost(
+			parts.files.map((f) => `${f.path} [T${f.turn}]`),
+			0.05,
+		) +
+		300; // headings and notes
+	return Math.max(share, budget - used);
+}
+
 export function shortenPrompt(text: string, maxWords: number): string {
 	const words = text.split(/\s+/).filter(Boolean).length;
 	return [
@@ -1951,6 +1992,14 @@ export function renderStatus(
 	}
 
 	const head = out.join("\n");
+	if (!config.stateOfWork) {
+		const sections = [head];
+		if (parts.notes.length) {
+			const notes = fitList(parts.notes, Math.max(0, budget - tok(head) - 10), (n) => `- ${n}`);
+			if (notes.kept.length) sections.push("", "## Review notes", notes.kept.map((n) => `- ${n}`).join("\n"));
+		}
+		return { text: sections.join("\n"), dropped };
+	}
 	const left = Math.max(0, budget - tok(head) - 40);
 	const stateHead = `## State of work${coveredTurns ? ` (covers turns ${coveredTurns})` : ""}`;
 	let narrative = parts.narrative.trim();
@@ -1992,7 +2041,9 @@ export function renderSummary(status: string, detail: TurnBlock[], config: Proto
 	].filter(Boolean);
 	const out = [
 		"# Session protocol",
-		"Older turns of this session were condensed. The state of work covers the oldest part; the most recent condensed turns follow in detail" +
+		(config.stateOfWork
+			? "Older turns of this session were condensed. The state of work covers the oldest part; the most recent condensed turns follow in detail"
+			: "Older turns of this session were condensed into the index below; the most recent condensed turns follow in detail") +
 			(config.keepUserMessages ? " with the user message verbatim" : "") +
 			". " +
 			(tools.length

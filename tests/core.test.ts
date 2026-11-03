@@ -33,6 +33,7 @@ import {
 	hasSystemMessage,
 	hideBlocks,
 	INTERRUPTED_PROMPT,
+	indexBudget,
 	interruptedRequest,
 	isUnsupportedModelCall,
 	LONG_CHAT_NOTE,
@@ -909,6 +910,41 @@ describe("index of older turns", () => {
 		expect(f?.index).toEqual(["palette wald chosen"]);
 		expect(f?.tags).toEqual(["Blattfarbe, DEMO_LEAFPAL"]);
 		expect(systemPromptSection(DEFAULT_CONFIG)).toContain("tags: 3-6 search terms");
+	});
+
+	it("gives the index the budget of the missing state of work", () => {
+		const parts = { rules: ["a rule"], open: ["an item"], files: [{ path: "a.c", turn: 1 }] };
+		const on = { ...DEFAULT_CONFIG, statusMaxTokens: 8000 };
+		const off = { ...on, stateOfWork: false };
+		expect(indexBudget(on, parts)).toBe(2800); // its share of 35 %
+		expect(indexBudget(off, parts)).toBeGreaterThan(7000); // what the short lists leave
+		expect(indexBudget(off, parts)).toBeLessThanOrEqual(8000);
+		// long lists keep their shares, the index gets the rest
+		const long = { rules: Array(500).fill("a rule that is long enough to count"), open: [], files: [] };
+		expect(indexBudget(off, long)).toBe(Math.max(2800, 8000 - 2000 - 300));
+	});
+
+	it("leaves the state of work out of the status when it is switched off", () => {
+		const config = { ...DEFAULT_CONFIG, stateOfWork: false, statusMaxTokens: 1500 };
+		const status = renderStatus(
+			{
+				rules: ["r"],
+				open: ["o"],
+				files: [],
+				narrative: "OLD STATE",
+				index: ["[T1] first"],
+				pendingLines: ["x"],
+				notes: [],
+			},
+			config,
+			"1-10",
+		);
+		expect(status.text).not.toContain("State of work");
+		expect(status.text).not.toContain("OLD STATE");
+		expect(status.text).toContain("## Index of older turns");
+		expect(status.text).toContain("[T1] first");
+		expect(renderSummary(status.text, [], config)).toContain("condensed into the index below");
+		expect(renderSummary("S", [], DEFAULT_CONFIG)).toContain("The state of work covers the oldest part");
 	});
 
 	it("keeps the requests unchanged while the block is written inline", () => {

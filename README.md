@@ -172,6 +172,7 @@ The German command names of earlier versions (`zeigen`, `anheften`, `lösen`, `a
 | `auxiliaryModel` | `""` | model for the extension's own requests as `"provider/model"`; empty uses the session model. Never changes the model of the normal chat |
 | `compaction` | `"protocol"` | `"default"` leaves compaction entirely to Pi |
 | `consolidate` | `true` | run the review of rules and open items |
+| `stateOfWork` | `true` | `false`: no state of work, so no fold requests at compaction (the slowest step) and nothing the model rewrites. The index takes the status budget the text would have had and keeps single lines for more turns; older turns stay reachable through the index and the lookup tools. Earlier summaries written by Pi itself are not merged then. Switching it back on folds the turns that left the detail tier in the meantime |
 | `keepRecentTurns` | `3` | keep this many last turns verbatim … |
 | `keepRecentPercent` | `10` | … but at most this share of the context window |
 | `keepUserMessages` | `true` | your messages verbatim in the detail tier |

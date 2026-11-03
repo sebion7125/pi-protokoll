@@ -452,6 +452,21 @@ describe("protokoll extension", () => {
 		expect(h.notes.some((n) => n.includes("not folded yet"))).toBe(true);
 	});
 
+	it("makes no fold request and writes no state of work when it is switched off", async () => {
+		h = harness(["SHOULD NOT BE ASKED"], { ...tiered, stateOfWork: false });
+		await h.fire("session_start", { reason: "startup" });
+		for (let i = 1; i <= 30; i++)
+			await h.turn(`question ${i}`, `answer ${i}\n<protocol>\nresult: r${i}\nindex: line ${i}\n</protocol>`);
+		const c = (await compact(h)).compaction;
+		expect(h.requests.length).toBe(0);
+		expect(c.summary).not.toContain("State of work");
+		expect(c.summary).toContain("## Index of older turns");
+		expect(c.summary).toContain("[T1] line 1");
+		expect(c.summary).toContain("## Recent turns in detail");
+		expect(c.details.status.narrative).toBe("");
+		expect(h.notes.some((n) => n.includes("not folded yet"))).toBe(false);
+	});
+
 	it("finds earlier turns with protocol_search", async () => {
 		await h.turn("please add shadow mapping", "done\n<protocol>\nresult: shadow mapping added\n</protocol>");
 		await h.turn("now fog", "done\n<protocol>\nresult: fog added\n</protocol>");

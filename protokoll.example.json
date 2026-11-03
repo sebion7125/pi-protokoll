@@ -12,6 +12,7 @@
   "auxiliaryModel": "",
   "compaction": "protocol",
   "consolidate": true,
+  "stateOfWork": true,
   "keepRecentTurns": 3,
   "keepRecentPercent": 10,
   "keepUserMessages": true,

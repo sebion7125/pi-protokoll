@@ -174,6 +174,15 @@ das Format selbst enthält. Der Präfix-Cache des Servers liest dabei nur die ne
 Anfrage pro Zug. Die Nachforderung (`followUp`) ist in diesem Modus immer aktiv. Ein Wechsel des Modus
 in einer laufenden Sitzung ändert den Systemprompt einmalig (Cache-Verlust einmal).
 
+### Ohne Zustandsbeschreibung (`stateOfWork: false`)
+
+Die Zustandsbeschreibung ist der einzige Teil, den das Modell bei jedem Compacting neu schreibt, und
+der langsamste Schritt. Mit `"stateOfWork": false` entfallen sie und die Falten-Anfragen. Der Index
+bekommt das frei werdende Budget und behält für mehr Züge eine eigene Zeile; Älteres bleibt über den Index
+und die Nachschlagewerkzeuge erreichbar. Frühere Zusammenfassungen, die Pi selbst geschrieben hat,
+werden dann nicht mehr eingearbeitet. Schaltest du wieder ein, werden die Züge gefaltet, die
+inzwischen aus der Detailstufe gefallen sind.
+
 ### Hilfsmodell
 
 `auxiliaryModel` (z. B. `"openai/gpt-4.1-mini"`) gilt **nur** für die eigenen Anfragen der

@@ -64,6 +64,7 @@ import {
 	hasProtocolKeys,
 	hasSystemMessage,
 	hideBlocks,
+	indexBudget,
 	interruptedRequest,
 	isNoneItem,
 	isUnsupportedModelCall,
@@ -1129,7 +1130,6 @@ export default function protokoll(pi: ExtensionAPI) {
 		let narrative = rebuild ? "" : (plan.previous?.narrative ?? "");
 		const folded = rebuild ? new Set<number>() : decodeRanges(plan.previous?.folded);
 		const foreignConsumed = new Set(plan.previous?.foreignConsumed ?? []);
-		const index = buildIndex(plan.older, protocols, Math.floor(config.statusMaxTokens * 0.35));
 
 		const condensedProtocols = plan.condensed
 			.map((t) => protocols.get(t.userEntryId))
@@ -1147,6 +1147,7 @@ export default function protokoll(pi: ExtensionAPI) {
 		const lastFinished = finished.length ? finished[finished.length - 1].number : rulesThrough;
 		let open = currentOpenItems(condensedProtocols);
 		const files = touchedFiles(condensedProtocols, plan.condensed, ctx.cwd);
+		const index = buildIndex(plan.older, protocols, indexBudget(config, { rules, open, files }));
 		// the narrative gets what index and lists leave of the status budget (at least a fifth)
 		const narrativeTokens = narrativeBudget(config, { index, rules, open, files });
 		// the model is asked for a state 10 % below the hard limit: it rarely hits a length target
@@ -1156,7 +1157,7 @@ export default function protokoll(pi: ExtensionAPI) {
 
 		const foldModel = protocolModel(ctx, config.auxiliaryModel).model;
 		const willConsolidate = useModel && config.consolidate && !!foldModel;
-		if (useModel && foldModel && (plan.toFold.length || plan.foreign.length)) {
+		if (config.stateOfWork && useModel && foldModel && (plan.toFold.length || plan.foreign.length)) {
 			const chunks = foldInputs(plan, branch, config, extra);
 			const steps = chunks.map((c, i) =>
 				bar?.add(
@@ -1217,8 +1218,9 @@ export default function protokoll(pi: ExtensionAPI) {
 		}
 
 		// turns not yet in the narrative need no extra lines: the index lists every older turn
-		const pendingTurns = plan.toFold.filter((t) => !folded.has(t.number));
-		const pendingForeign = plan.foreign.filter((f) => !foreignConsumed.has(f.id));
+		// (without a state of work nothing is folded, so nothing is pending: the index lists every turn)
+		const pendingTurns = config.stateOfWork ? plan.toFold.filter((t) => !folded.has(t.number)) : [];
+		const pendingForeign = config.stateOfWork ? plan.foreign.filter((f) => !foreignConsumed.has(f.id)) : [];
 		const pendingLines = pendingForeign.map(
 			(f) =>
 				`[earlier summary, not merged yet] ${clip((f.summary ?? "").replace(/\s+/g, " "), 600, "use protocol_search")}`,
@@ -1659,6 +1661,7 @@ export default function protokoll(pi: ExtensionAPI) {
 					ctx.ui.notify(
 						`protokoll ${enabled ? "on" : strip ? "off (section out of the prompt)" : "off (note withdraws it)"}` +
 							(config.inline ? "" : " · afterwards only (nothing in the prompt)") +
+							(config.stateOfWork ? "" : " · no state of work") +
 							` · ${turns.length} turns, ${written} with protocol` +
 							` · pinned: ${pins.length ? pins.join(", ") : "none"}` +
 							` · compaction: ${config.compaction} · kept: ${config.keepRecentTurns} turns / ${config.keepRecentPercent} %` +
