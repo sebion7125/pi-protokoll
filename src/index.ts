@@ -120,6 +120,8 @@ const SEARCH_TOOL = "protocol_search";
 const READ_TOOL = "protocol_read";
 /** Fixed text of the summary around the tiers (header, section titles). */
 const SUMMARY_OVERHEAD = 400;
+/** Share of the narrative budget that the model is told to aim for. */
+const NARRATIVE_TARGET = 0.9;
 const STATUS_KEY = "protokoll";
 /** Widget with the result of the last compaction; Pi redraws the chat after a compaction, which removes notifications. */
 const RESULT_KEY = "protokoll-result";
@@ -1140,7 +1142,9 @@ export default function protokoll(pi: ExtensionAPI) {
 		const files = touchedFiles(condensedProtocols, plan.condensed, ctx.cwd);
 		// the narrative gets what index and lists leave of the status budget (at least a fifth)
 		const narrativeTokens = narrativeBudget(config, { index, rules, open, files });
-		const words = Math.max(60, Math.floor(narrativeTokens * 0.7));
+		// the model is asked for a state 10 % below the hard limit: it rarely hits a length target
+		// exactly, and the limit itself stays what the settings say
+		const words = Math.max(60, Math.floor(narrativeTokens * NARRATIVE_TARGET * 0.7));
 		let newlyFolded = 0;
 
 		const foldModel = protocolModel(ctx, config.auxiliaryModel).model;

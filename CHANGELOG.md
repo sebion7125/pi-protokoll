@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The model is asked for 90 % of the state-of-work budget instead of 100 %; the hard limit stays what the settings say. It rarely hits a length target exactly, and a state that ends up slightly over was cut in the middle.
+
 ## 0.9.7 – 2026-10-31
 
 - The system prompt section carries a fixed note about the length of a session. Models, Qwen3.x among them, sometimes invent a context fill level (`Context left: 12 %`, `Context exhausted`) and advise a fresh chat; nothing in Pi, in this extension or in any installed package prints such lines. The note states the facts instead of forbidding the guess: without a fill level given in the current turn the model has no information about the window, so it states none, never claims it was told to start a new session, and suggests a fresh session only on a concrete, verifiable reason – the user decides. The text is fixed from now on, so the prefix cache is invalidated once.
