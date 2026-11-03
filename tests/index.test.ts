@@ -520,6 +520,53 @@ describe("protokoll extension", () => {
 		expect(h.switchNotes().length).toBe(1); // no second note in the next runs
 	});
 
+	describe("afterwards-only mode (inline: false)", () => {
+		const block = (result: string) => `<protocol>\nresult: ${result}\n</protocol>`;
+
+		it("adds nothing about the protocol to the prompt and asks for the block after every answer", async () => {
+			h = harness([block("first"), block("second")], { inline: false });
+			await h.fire("session_start", { reason: "startup" });
+			const first = await h.turn("hi", "Hello."); // the model never saw the format, so no block
+			expect(first.sections.session_protocol).toBeUndefined();
+			expect(h.promptText()).not.toContain("protocol");
+			expect(first.draft?.source).toBe("followup");
+			expect(first.draft?.fields?.result).toEqual(["first"]);
+
+			const second = await h.turn("again", "Done.");
+			expect(second.draft?.fields?.result).toEqual(["second"]);
+			expect(h.requests.length).toBe(2); // one extra request per turn, nothing more
+		});
+
+		it("sends the format in the request, behind the unchanged context", async () => {
+			h = harness([block("x")], { inline: false });
+			await h.fire("session_start", { reason: "startup" });
+			await h.turn("q", "An answer.");
+			const messages = h.requests[0].context.messages;
+			expect(messages[0]).toEqual({ role: "system", content: "S" }); // prefix as the chat had it
+			const last = messages.at(-1);
+			expect(last.role).toBe("user");
+			expect(last.content).toContain("tags: 3-6 search terms");
+			expect(last.content).not.toMatch(/system prompt/i);
+		});
+
+		it("asks even when followUp is switched off, since this is the only way to get a block", async () => {
+			h = harness([block("forced")], { inline: false, followUp: false });
+			await h.fire("session_start", { reason: "startup" });
+			const { draft } = await h.turn("q", "A");
+			expect(draft?.fields?.result).toEqual(["forced"]);
+		});
+
+		it("switches on and off without notes, since there is nothing in the prompt to withdraw", async () => {
+			h = harness([block("a")], { inline: false });
+			await h.fire("session_start", { reason: "startup" });
+			await h.turn("q", "A");
+			await h.commands.get("protokoll").handler("off", h.ctx);
+			await h.commands.get("protokoll").handler("on", h.ctx);
+			expect(h.switchNotes()).toEqual([]);
+			expect(h.notes.some((n) => n.includes("the prompt stays untouched"))).toBe(true);
+		});
+	});
+
 	it("takes section and tools out with off --strip and puts both back with on", async () => {
 		await h.turn("first", "A\n<protocol>result: first</protocol>");
 		await h.commands.get("protokoll").handler("off --strip", h.ctx);

@@ -163,7 +163,8 @@ The German command names of earlier versions (`zeigen`, `anheften`, `lösen`, `a
 | `tag` | `"protocol"` | name of the block |
 | `maxWords` | `250` | length guide for the block in the system prompt (changing it invalidates the prefix cache once) |
 | `strip` | `true` | remove the block from the stored answer |
-| `followUp` | `true` | ask for a missing block right away |
+| `inline` | `true` | `true`: the system prompt asks the model to end each final answer with the block. `false`: **afterwards-only mode** – nothing about the protocol goes into the system prompt, the model never sees the format while it works; after every final answer the extension sends one extra request (the unchanged chat context plus one instruction carrying the format). Costs one request per turn, which a prefix cache answers by reading only the new tokens. Switching the mode in a running session changes the prompt once (prefix cache miss) |
+| `followUp` | `true` | ask for a missing block right away (always on when `inline` is `false`) |
 | `followUpReasoning` | `"off"` | thinking level of requests **without** chat context (transcript backfill, state of work, index repair). Requests that repeat the chat context always use the chat's level, otherwise the prefix cache misses |
 | `consolidateReasoning` | `"low"` | thinking level of the review; comparing each rule with the later ones works much better with some thinking |
 | `followUpMaxTokens` | `16384` | output limit of requests with chat context; thinking counts against it |

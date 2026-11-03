@@ -25,17 +25,22 @@ import {
 	editedAway,
 	encodeRanges,
 	extractBlock,
+	FOLLOW_UP_PROMPT,
 	type FoldState,
 	foldInputs,
+	followUpRequest,
 	hasProtocolKeys,
 	hasSystemMessage,
 	hideBlocks,
+	INTERRUPTED_PROMPT,
+	interruptedRequest,
 	isUnsupportedModelCall,
 	LONG_CHAT_NOTE,
 	loadConfig,
 	mergeConfig,
 	narrativeBudget,
 	type PlainEntry,
+	PROGRESS_PROMPT,
 	type ProtocolConfig,
 	type ProtocolEntryData,
 	parseBlock,
@@ -43,6 +48,7 @@ import {
 	parseModelRef,
 	parseSupplement,
 	planCompaction,
+	progressRequest,
 	renderDetailBlock,
 	renderStatus,
 	renderSummary,
@@ -903,6 +909,25 @@ describe("index of older turns", () => {
 		expect(f?.index).toEqual(["palette wald chosen"]);
 		expect(f?.tags).toEqual(["Blattfarbe, DEMO_LEAFPAL"]);
 		expect(systemPromptSection(DEFAULT_CONFIG)).toContain("tags: 3-6 search terms");
+	});
+
+	it("keeps the requests unchanged while the block is written inline", () => {
+		expect(followUpRequest(DEFAULT_CONFIG)).toBe(FOLLOW_UP_PROMPT("protocol"));
+		expect(interruptedRequest(DEFAULT_CONFIG)).toBe(INTERRUPTED_PROMPT("protocol"));
+		expect(progressRequest(DEFAULT_CONFIG)).toBe(PROGRESS_PROMPT("protocol"));
+	});
+
+	it("carries the format in the request when nothing is in the system prompt", () => {
+		const config = { ...DEFAULT_CONFIG, inline: false };
+		for (const text of [followUpRequest(config), interruptedRequest(config), progressRequest(config)]) {
+			// self-contained: the format, no reference to a system prompt the model never got
+			expect(text).toContain("<protocol>");
+			expect(text).toContain("tags: 3-6 search terms");
+			expect(text).toContain(`Stay under ${config.maxWords} words`);
+			expect(text).not.toMatch(/system prompt/i);
+			expect(text).not.toContain("At the very end of every final answer");
+			expect(text.trimEnd().endsWith("Do not mention the block in your answer.")).toBe(true);
+		}
 	});
 
 	it("states the facts about context length instead of leaving them to guesswork", () => {

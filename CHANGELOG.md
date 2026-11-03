@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Afterwards-only mode** (`"inline": false`, default `true`). Nothing about the protocol goes into the system prompt – no section, no length note – so the model never sees the format while it works. After every final answer the extension sends one extra request: the unchanged chat context plus one instruction that carries the format itself, so a prefix cache reads only the new tokens. The follow-up is always on in this mode; the requests for interrupted turns and for compaction in the middle of a turn carry the format the same way. `/protokoll on|off` needs no switch notes in this mode. With `inline: true` all texts and requests are byte-identical to before, so existing sessions keep their prefix cache. For models that ignore or are confused by the inline instruction.
 - The model is asked for 90 % of the state-of-work budget instead of 100 %; the hard limit stays what the settings say. It rarely hits a length target exactly, and a state that ends up slightly over was cut in the middle.
 
 ## 0.9.7 – 2026-10-31

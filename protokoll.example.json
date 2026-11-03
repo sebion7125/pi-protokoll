@@ -3,6 +3,7 @@
   "tag": "protocol",
   "maxWords": 250,
   "strip": true,
+  "inline": true,
   "followUp": true,
   "followUpReasoning": "off",
   "consolidateReasoning": "low",

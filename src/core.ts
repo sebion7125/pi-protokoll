@@ -21,7 +21,14 @@ export interface ProtocolConfig {
 	maxWords: number;
 	/** Remove the block from the stored answer (it lives on as a protocol entry). */
 	strip: boolean;
-	/** Ask the model again right after a final answer that carried no block. */
+	/**
+	 * true: the system prompt asks the model to end every final answer with the block (a follow-up
+	 * request only fills the gaps). false: nothing is added to the system prompt and the model never
+	 * sees the format while it works; the block is requested after every final answer in an extra
+	 * request that repeats the unchanged chat context plus one instruction carrying the format.
+	 */
+	inline: boolean;
+	/** Ask the model again right after a final answer that carried no block (always on when `inline` is false). */
 	followUp: boolean;
 	/** Thinking level of the extension's requests WITHOUT the chat context (backfill from transcript, state, review); "off" turns thinking off. */
 	followUpReasoning: "off" | "minimal" | "low" | "medium" | "high";
@@ -82,6 +89,7 @@ export const DEFAULT_CONFIG: ProtocolConfig = {
 	tag: "protocol",
 	maxWords: 250,
 	strip: true,
+	inline: true,
 	followUp: true,
 	followUpReasoning: "off",
 	consolidateReasoning: "low",
@@ -263,13 +271,10 @@ export function emptyFields(): ProtocolFields {
 	return { result: [], decision: [], files: [], open: [], rule: [], revoke: [], index: [], tags: [], other: [] };
 }
 
-export function systemPromptSection(config: ProtocolConfig): string {
+/** The block with its keys and the closing rules; shared by the system prompt section and the requests that carry the format themselves. */
+function blockFormatLines(config: ProtocolConfig): string[] {
 	const t = config.tag;
 	return [
-		"At the very end of every final answer to the user (not in intermediate messages that call tools), append a protocol block.",
-		"The harness removes it from the visible answer and uses it to keep long sessions within the context window, so it must stand on its own without the rest of the conversation.",
-		"The block is plain text written at the end of your answer; it is not a tool, so never call a tool to write it.",
-		"",
 		`<${t}>`,
 		"result: what this turn produced or answered, 1-3 sentences",
 		"decision: one decision or agreement per line, repeat the key for more",
@@ -282,6 +287,16 @@ export function systemPromptSection(config: ProtocolConfig): string {
 		`</${t}>`,
 		"",
 		`Leave out keys with nothing to report, except open. Stay under ${config.maxWords} words. Write the block in English, whatever language the conversation uses. Copy names, numbers, paths and identifiers exactly. Do not mention the block in your answer.`,
+	];
+}
+
+export function systemPromptSection(config: ProtocolConfig): string {
+	return [
+		"At the very end of every final answer to the user (not in intermediate messages that call tools), append a protocol block.",
+		"The harness removes it from the visible answer and uses it to keep long sessions within the context window, so it must stand on its own without the rest of the conversation.",
+		"The block is plain text written at the end of your answer; it is not a tool, so never call a tool to write it.",
+		"",
+		...blockFormatLines(config),
 	].join("\n");
 }
 
@@ -312,6 +327,41 @@ export const INTERRUPTED_PROMPT = (tag: string) =>
 /** The context is condensed while the turn is still running. */
 export const PROGRESS_PROMPT = (tag: string) =>
 	`The context is about to be condensed while you are still working on the turn above; you will continue afterwards. Do not call tools now. Write only the <${tag}> block for the work so far as the system prompt describes it, with everything still to do for this turn under open. Output nothing else.`;
+
+/**
+ * With `inline: false` the system prompt says nothing about the block, so the request that asks for
+ * it has to carry the format. The three requests below replace FOLLOW_UP_PROMPT, INTERRUPTED_PROMPT
+ * and PROGRESS_PROMPT in that mode; with `inline: true` they return those unchanged. The format
+ * stands at the very end, after the unchanged chat context, so a prefix cache still reads only
+ * the new tokens.
+ */
+function withFormat(config: ProtocolConfig, request: string): string {
+	return [request, "", ...blockFormatLines(config)].join("\n");
+}
+
+export function followUpRequest(config: ProtocolConfig): string {
+	if (config.inline) return FOLLOW_UP_PROMPT(config.tag);
+	return withFormat(
+		config,
+		`The turn above is finished. Write its session protocol now: a short record of what the turn produced, what was decided and what is still open, which stands in for the turn once the conversation is condensed. Do not continue the task and do not call tools. Output only the <${config.tag}> block, in this format:`,
+	);
+}
+
+export function interruptedRequest(config: ProtocolConfig): string {
+	if (config.inline) return INTERRUPTED_PROMPT(config.tag);
+	return withFormat(
+		config,
+		`Your work on the turn above was interrupted before it finished. Do not continue it and do not call tools. Write its session protocol: what was actually done so far, decisions taken, files changed, and under open what is still unfinished. Output only the <${config.tag}> block, in this format:`,
+	);
+}
+
+export function progressRequest(config: ProtocolConfig): string {
+	if (config.inline) return PROGRESS_PROMPT(config.tag);
+	return withFormat(
+		config,
+		`The context is about to be condensed while you are still working on the turn above; you will continue afterwards. Do not call tools now. Write the session protocol for the work so far, with everything still to do for this turn under open. Output only the <${config.tag}> block, in this format:`,
+	);
+}
 
 /** index and tags for stored protocols that have none, several turns per request (/protokoll repair). */
 export function supplementPrompt(items: { number: number; user: string; fields: ProtocolFields }[]): string {

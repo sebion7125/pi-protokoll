@@ -57,14 +57,14 @@ import {
 	enabledRulesNote,
 	encodeRanges,
 	extractBlock,
-	FOLLOW_UP_PROMPT,
 	type FoldState,
 	foldInputs,
 	foldPrompt,
+	followUpRequest,
 	hasProtocolKeys,
 	hasSystemMessage,
 	hideBlocks,
-	INTERRUPTED_PROMPT,
+	interruptedRequest,
 	isNoneItem,
 	isUnsupportedModelCall,
 	LONG_CHAT_NOTE,
@@ -75,7 +75,6 @@ import {
 	type PinEntryData,
 	type PlainEntry,
 	PROGRESS_CHANNEL,
-	PROGRESS_PROMPT,
 	PROTOCOL_ENTRY,
 	type ProgressEvent,
 	type ProgressStep,
@@ -88,6 +87,7 @@ import {
 	parseModelRef,
 	parseSupplement,
 	planCompaction,
+	progressRequest,
 	protocolsWith,
 	REBUILD_ENTRY,
 	rebuildRequested,
@@ -553,6 +553,13 @@ export default function protokoll(pi: ExtensionAPI) {
 		showResult(ctx, undefined);
 		if (enabled && config.backfill) await backfillOnContinue(ctx);
 
+		if (!config.inline) {
+			// afterwards-only mode: the model never reads anything about the protocol. The block is
+			// requested after the final answer (agent_before_settle), so no section and no switch notes.
+			delete event.systemPromptOptions.sections[SECTION_KEY];
+			return;
+		}
+
 		const section = sectionText();
 		const projected = projectedMessages(ctx);
 		const inPrompt = currentSections(projected)[SECTION_KEY] !== undefined;
@@ -596,7 +603,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			let data = await backfillByPrefix(
 				ctx,
 				last,
-				INTERRUPTED_PROMPT(config.tag),
+				interruptedRequest(config),
 				AbortSignal.timeout(config.followUpTimeoutMs),
 				{ bar, step },
 			);
@@ -783,7 +790,7 @@ export default function protokoll(pi: ExtensionAPI) {
 	pi.on("agent_before_settle", async (event, ctx) => {
 		// a compaction keeps the prompt (Pi copies the system message onto its entry) but can cut away a
 		// switch note, so notes that now contradict the state go out of the context here
-		const edits = staleSwitchEntries(plainBranch(ctx), { enabled, strip }).map((id) => ({
+		const edits = staleSwitchEntries(plainBranch(ctx), { enabled, strip: strip || !config.inline }).map((id) => ({
 			type: "context_edit" as const,
 			targetId: id,
 			replacement: null,
@@ -812,7 +819,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			!drafts.some((d) => d.userEntryId === turn.userEntryId)
 		) {
 			drafts.push(
-				config.followUp && protocolModel(ctx, config.auxiliaryModel).model
+				(config.followUp || !config.inline) && protocolModel(ctx, config.auxiliaryModel).model
 					? await followUp(event.context.llmMessages, turn, ctx)
 					: { version: 1, userEntryId: turn.userEntryId, turn: turn.number, source: "missing" },
 			);
@@ -840,7 +847,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			const signal = AbortSignal.any(signals);
 			const messages = [
 				...(llmMessages as never[]),
-				{ role: "user" as const, content: FOLLOW_UP_PROMPT(config.tag), timestamp: Date.now() },
+				{ role: "user" as const, content: followUpRequest(config), timestamp: Date.now() },
 			];
 			const reply = await askWithChatContext(ctx, messages, signal, { bar, step });
 			if (reply.error !== undefined) {
@@ -978,10 +985,10 @@ export default function protokoll(pi: ExtensionAPI) {
 			let data: ProtocolEntryData | undefined;
 			if (allowPrefix && turn.userEntryId === lastTurn?.userEntryId) {
 				const instruction = job.progress
-					? PROGRESS_PROMPT(config.tag)
+					? progressRequest(config)
 					: protocols.get(turn.userEntryId)?.source === "missing"
-						? FOLLOW_UP_PROMPT(config.tag)
-						: INTERRUPTED_PROMPT(config.tag);
+						? followUpRequest(config)
+						: interruptedRequest(config);
 				data = await backfillByPrefix(ctx, turn, instruction, signal, { bar, step: job.step });
 			}
 			if (!data && !signal?.aborted) data = await backfillByTranscript(ctx, turn, signal, { bar, step: job.step });
@@ -1650,7 +1657,9 @@ export default function protokoll(pi: ExtensionAPI) {
 							(lastC?.tokensBefore ? ` at ${fmt(lastC.tokensBefore)} tokens` : "")
 						: " · not compacted yet";
 					ctx.ui.notify(
-						`protokoll ${enabled ? "on" : strip ? "off (section out of the prompt)" : "off (note withdraws it)"} · ${turns.length} turns, ${written} with protocol` +
+						`protokoll ${enabled ? "on" : strip ? "off (section out of the prompt)" : "off (note withdraws it)"}` +
+							(config.inline ? "" : " · afterwards only (nothing in the prompt)") +
+							` · ${turns.length} turns, ${written} with protocol` +
 							` · pinned: ${pins.length ? pins.join(", ") : "none"}` +
 							` · compaction: ${config.compaction} · kept: ${config.keepRecentTurns} turns / ${config.keepRecentPercent} %` +
 							` · detail ≤ ${config.detailMaxTokens}, status ≤ ${config.statusMaxTokens} tokens` +
@@ -1719,6 +1728,18 @@ export default function protokoll(pi: ExtensionAPI) {
 					strip = on ? false : wantsStrip;
 					pi.appendEntry<StateEntryData>(STATE_ENTRY, { enabled, ...(strip ? { strip: true } : {}) });
 					syncTool();
+					if (!config.inline) {
+						// nothing in the prompt to switch: the protocol is simply requested or not after each answer
+						ctx.ui.notify(
+							on
+								? "protokoll enabled for this session – the protocol is requested after every final answer; the prompt stays untouched"
+								: strip
+									? "protokoll disabled for this session – no protocol is requested any more and the protocol tools go out of the prompt (the next request reads the whole context again, once)"
+									: 'protokoll disabled for this session – no protocol is requested any more; the protocol tools answer "pi-protokoll is disabled"',
+							"info",
+						);
+						return;
+					}
 					const projected = projectedMessages(ctx);
 					const inPrompt = currentSections(projected)[SECTION_KEY] !== undefined;
 					if (!on) {

@@ -163,6 +163,17 @@ Alle Schlüssel mit Standardwerten und Bedeutung stehen in der Tabelle der
 [englischen README](README.md#configuration); die Werte in `protokoll.example.json` sind die
 Standardwerte.
 
+### Nur nachträglich (`inline: false`)
+
+Standardmäßig bittet ein Abschnitt im Systemprompt das Modell, jede abschließende Antwort mit dem
+Protokollblock zu beenden. Manche Modelle ignorieren das, verwechseln es mit der Aufgabe oder geraten
+mit der Nachforderung durcheinander. Mit `"inline": false` kommt **nichts** über das Protokoll in den
+Systemprompt: Das Modell sieht das Format nie, während es arbeitet. Nach jeder abschließenden Antwort
+schickt die Erweiterung eine zusätzliche Anfrage – den unveränderten Chatkontext plus eine Anweisung, die
+das Format selbst enthält. Der Präfix-Cache des Servers liest dabei nur die neuen Token. Kosten: eine
+Anfrage pro Zug. Die Nachforderung (`followUp`) ist in diesem Modus immer aktiv. Ein Wechsel des Modus
+in einer laufenden Sitzung ändert den Systemprompt einmalig (Cache-Verlust einmal).
+
 ### Hilfsmodell
 
 `auxiliaryModel` (z. B. `"openai/gpt-4.1-mini"`) gilt **nur** für die eigenen Anfragen der
