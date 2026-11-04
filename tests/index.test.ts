@@ -247,6 +247,12 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 	};
 }
 
+/** The state after a compaction: the entry is in the branch and Pi has announced it. */
+async function afterCompaction(hh: ReturnType<typeof harness>) {
+	hh.branch.push({ id: "cmp-tools", type: "compaction", summary: "s", firstKeptEntryId: "none" } as never);
+	await hh.fire("session_compact", { compactionEntry: { summary: "s", tokensBefore: 1 }, fromExtension: true });
+}
+
 describe("protokoll extension", () => {
 	let h: ReturnType<typeof harness>;
 	beforeEach(async () => {
@@ -254,11 +260,29 @@ describe("protokoll extension", () => {
 		await h.fire("session_start", { reason: "startup" });
 	});
 
-	it("adds the prompt section and activates the lookup tool", async () => {
+	it("adds the prompt section, and declares the lookup tools only once a compaction exists", async () => {
 		const { sections } = await h.turn("hi", "Hello.\n<protocol>\nresult: greeted\n</protocol>");
 		expect(sections.session_protocol).toContain("<protocol>");
 		expect(sections.session_protocol).toContain("you have no information about");
+		// nothing to look up while every turn is still in the context
+		for (const name of ["protocol_turn", "protocol_read", "protocol_search"])
+			expect(h.activeTools()).not.toContain(name);
+		await afterCompaction(h);
+		for (const name of ["protocol_turn", "protocol_read", "protocol_search"]) expect(h.activeTools()).toContain(name);
+	});
+
+	it("declares the lookup tools right away in a session that already holds a compaction", async () => {
+		h = harness();
+		h.branch.push({ id: "old-cmp", type: "compaction", summary: "s", firstKeptEntryId: "none" } as never);
+		await h.fire("session_start", { reason: "startup" });
 		expect(h.activeTools()).toContain("protocol_turn");
+	});
+
+	it("tells a model that probes a missing turn to stop", async () => {
+		await h.turn("hi", "Hello.\n<protocol>\nresult: greeted\n</protocol>");
+		await expect(
+			h.tools.get("protocol_turn").execute("id", { turn: 2 }, undefined, undefined, h.ctx),
+		).rejects.toThrow(/only 1 turn so far.*do not try further numbers/s);
 	});
 
 	it("strips the block and stores it", async () => {
@@ -314,7 +338,6 @@ describe("protokoll extension", () => {
 		expect(h.promptText()).toBe(promptBefore); // the prefix stays byte for byte
 		expect(message.content[0].text).toContain("<protocol>");
 		expect(draft).toBeUndefined();
-		expect(h.activeTools()).toContain("protocol_turn");
 		expect(h.switchNotes()).toEqual([expect.stringContaining("[pi-protokoll disabled]")]);
 	});
 
@@ -473,6 +496,7 @@ describe("protokoll extension", () => {
 		const res = await h.tools.get("protocol_search").execute("id", { query: "shadow" }, undefined, undefined, h.ctx);
 		expect(res.content[0].text).toContain("Turn 1");
 		expect(res.content[0].text).not.toContain("Turn 2");
+		await afterCompaction(h);
 		await h.commands.get("protokoll").handler("aus", h.ctx);
 		expect(h.activeTools()).toContain("protocol_search");
 		const off = await h.tools.get("protocol_search").execute("id", { query: "shadow" }, undefined, undefined, h.ctx);
@@ -584,6 +608,8 @@ describe("protokoll extension", () => {
 
 	it("takes section and tools out with off --strip and puts both back with on", async () => {
 		await h.turn("first", "A\n<protocol>result: first</protocol>");
+		await afterCompaction(h);
+		expect(h.activeTools()).toContain("protocol_turn");
 		await h.commands.get("protokoll").handler("off --strip", h.ctx);
 		expect(h.activeTools()).not.toContain("protocol_turn");
 		expect(h.switchNotes()).toEqual([]); // the rules are gone, so nothing to withdraw
@@ -1367,6 +1393,7 @@ describe("protokoll extension", () => {
 		expect(text).toContain("Decision: exp2 falloff");
 		expect(text).toContain("Open then: tune density");
 		expect(text).toContain("### Turn 3\n(does not exist");
+		await afterCompaction(h);
 		expect(h.activeTools()).toContain("protocol_read");
 	});
 });

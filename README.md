@@ -177,7 +177,7 @@ The German command names of earlier versions (`zeigen`, `anheften`, `lösen`, `a
 | `keepRecentPercent` | `10` | … but at most this share of the context window |
 | `keepUserMessages` | `true` | your messages verbatim in the detail tier |
 | `userMessageMaxChars` | `4000` | longer messages (pasted logs) are shortened there |
-| `lookupTool` | `true` | offer `protocol_turn` and `protocol_read` |
+| `lookupTool` | `true` | offer `protocol_turn` and `protocol_read`; like `protocol_search` they are declared only once the session holds a compaction, because before that every turn is still in the context |
 | `lookupMaxTokens` | `8000` | output limit of those tools |
 | `pinnedMaxTokens` | `8000` | size limit per pinned turn |
 | `digestMaxTokens` | `1500` | size limit per turn without protocol |

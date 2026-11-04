@@ -508,6 +508,7 @@ export default function protokoll(pi: ExtensionAPI) {
 		const state = sessionState(plainBranch(ctx), config.enabled);
 		enabled = state.enabled;
 		strip = state.strip;
+		refreshCompacted(ctx);
 		syncTool();
 	};
 
@@ -522,8 +523,19 @@ export default function protokoll(pi: ExtensionAPI) {
 	 * The tools stay declared while the protocol is on or softly off, so switching does not touch the
 	 * prompt; only `--strip` takes them out.
 	 */
+	/**
+	 * The lookup tools are declared only once the branch holds a compaction. Before that every turn is
+	 * still in the context, so there is nothing to look up; a model that sees the tools anyway may
+	 * start probing them (one reported session counted `protocol_turn(1)`, `(2)`, `(3)` … for 35
+	 * rounds). A compaction rewrites the context anyway, so declaring them then costs no extra cache.
+	 */
+	let compacted = false;
+	const refreshCompacted = (ctx: ExtensionContext) => {
+		compacted = plainBranch(ctx).some((e) => e.type === "compaction");
+	};
+
 	const syncTool = () => {
-		const declared = enabled || !strip;
+		const declared = (enabled || !strip) && compacted;
 		const want = new Map([
 			[TOOL_NAME, declared && config.lookupTool],
 			[READ_TOOL, declared && config.lookupTool],
@@ -546,7 +558,9 @@ export default function protokoll(pi: ExtensionAPI) {
 		pending = new Map();
 		// /tree can move to a branch where /protokoll on|off was set differently
 		const state = sessionState(plainBranch(ctx), config.enabled);
-		if (state.enabled !== enabled || state.strip !== strip) {
+		const hadCompaction = compacted;
+		refreshCompacted(ctx);
+		if (state.enabled !== enabled || state.strip !== strip || compacted !== hadCompaction) {
 			enabled = state.enabled;
 			strip = state.strip;
 			syncTool();
@@ -1414,6 +1428,8 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	// after any compaction (own or Pi's): how big the context is now
 	pi.on("session_compact", async (event, ctx) => {
+		compacted = true;
+		syncTool();
 		try {
 			const messages = ctx.sessionManager.buildSessionProjection().messages as {
 				role: string;
@@ -1469,7 +1485,12 @@ export default function protokoll(pi: ExtensionAPI) {
 			if (!enabled) return disabledToolResult();
 			const turns = collectTurns(plainBranch(ctx));
 			const turn = turns[params.turn - 1];
-			if (!turn) throw new Error(`Turn ${params.turn} does not exist; this session has ${turns.length} turns.`);
+			if (!turn)
+				throw new Error(
+					`Turn ${params.turn} does not exist: this session has only ${turns.length} turn${turns.length === 1 ? "" : "s"} so far. ` +
+						"Turn numbers come from the index of the session protocol; do not try further numbers. " +
+						"Whatever is still visible in the conversation needs no lookup.",
+				);
 			const full = serializeTurn(turn.entries, 4000);
 			const text = clip(full, config.lookupMaxTokens * 4, "output limit of protocol_turn reached");
 			return {
