@@ -1,5 +1,7 @@
 # pi-protokoll
 
+![What one model request is made of after each of 23 compactions in a real 10-day session](https://raw.githubusercontent.com/sebion7125/pi-protokoll/main/docs/preview.png)
+
 A [Pi](https://pi.dev) extension that makes very long sessions possible with local models:
 the model writes a short protocol at the end of every turn, and compaction builds a bounded,
 tiered summary from those protocols instead of re-reading and summarizing the whole history.

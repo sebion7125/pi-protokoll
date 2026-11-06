@@ -23,7 +23,8 @@
 	"pi": {
 		"extensions": [
 			"./src/index.ts"
-		]
+		],
+		"image": "https://raw.githubusercontent.com/sebion7125/pi-protokoll/main/docs/preview.png"
 	},
 	"files": [
 		"src",

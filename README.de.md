@@ -1,5 +1,7 @@
 # pi-protokoll
 
+![Was ein Modell-Request nach jedem der 23 Compactions in einer echten 10-Tage-Sitzung umfasst](https://raw.githubusercontent.com/sebion7125/pi-protokoll/main/docs/preview.png)
+
 Eine [Pi](https://pi.dev)-Erweiterung für sehr lange Sitzungen mit lokalen Modellen: Das Modell
 schreibt am Ende jedes Zugs ein kurzes Protokoll, und das Compacting baut daraus eine
 begrenzte, gestufte Zusammenfassung, statt den ganzen Verlauf noch einmal lesen und
