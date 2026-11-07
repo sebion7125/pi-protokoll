@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Preview image corrected.** The hatched "tool schemas + chat template (derived)" segment of the old chart was mostly counting error: `ceil(chars / 3.5)` against a tokenizer that needs 2.5–3.7 characters per token in the summary, depending on how much code and how many paths it holds. Measured on the same session (now 12 days, 224 turns by `collectTurns`, 24 compactions, 2,923 calls): the first request – system prompt, tool schemas, chat template – costs 4,365 tokens, so schemas and template are at most about 1k and constant. The new chart rebuilds every request with pi's projection *and* its replay rules (thinking from another model and aborted replies are not sent), prices the transcript at rates fitted on 2,876 consecutive requests (tool output 3.0, tool calls 3.1, own turns 3.2, reasoning 3.5, answers 3.3 characters per token, 9 tokens framing per message, 231 tokens RMS error), and gives pi-protokoll's summary the remainder of the reported total, split across its tiers by character share. The old turn count (236) was wrong as well. The session also ran for 30 minutes on a cloud model (Kimi K3.1), brought in once to draft a plan; the chart now marks that window instead of saying "no cloud".
+
 ## 0.9.8 – 2026-11-06
 
 - **The lookup tools (`protocol_turn`, `protocol_read`, `protocol_search`) are declared only once the session holds a compaction.** Before that every turn is still in the context and there is nothing to look up. A reported session (Qwen 3.8-27B) with a single message "hi" ran 35 rounds in which the model called `protocol_turn(1)`, `(2)`, `(3)` … and each result said the turn did not exist; the extension had written nothing, the loop was the tool calls alone. A compaction rewrites the context anyway, so declaring the tools then costs no extra cache. The "turn does not exist" result now says how many turns there are and tells the model not to try further numbers.
