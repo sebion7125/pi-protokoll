@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.10 – 2026-11-08
+
+- Both READMEs state what a compaction does to the context and the prefix cache, measured on the session in the chart: about 213,000 → a median of 67,000 tokens in the next request (about 38,000 of them the summary), 99.8 % of the prompt tokens from the cache in the median request, about 62,000 tokens read again once right after a cut.
+- More keywords for the npm search: `context-compaction`, `prompt-cache`, `kv-cache`, `incremental-summary`, `long-sessions`, `llama.cpp`, `ollama`.
+
 ## 0.9.9 – 2026-11-07
 
 - **Preview image corrected.** The hatched "tool schemas + chat template (derived)" segment of the old chart was mostly counting error: `ceil(chars / 3.5)` against a tokenizer that needs 2.5–3.7 characters per token in the summary, depending on how much code and how many paths it holds. Measured on the same session (now 12 days, 224 turns by `collectTurns`, 24 compactions, 2,923 calls): the first request – system prompt, tool schemas, chat template – costs 4,365 tokens, so schemas and template are at most about 1k and constant. The new chart rebuilds every request with pi's projection *and* its replay rules (thinking from another model and aborted replies are not sent), prices the transcript at rates fitted on 2,876 consecutive requests (tool output 3.0, tool calls 3.1, own turns 3.2, reasoning 3.5, answers 3.3 characters per token, 9 tokens framing per message, 231 tokens RMS error), and gives pi-protokoll's summary the remainder of the reported total, split across its tiers by character share. The old turn count (236) was wrong as well. The session also ran for 30 minutes on a cloud model (Kimi K3.1), brought in once to draft a plan; the chart now marks that window instead of saying "no cloud".

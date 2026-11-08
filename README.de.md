@@ -27,6 +27,13 @@ Gemessen in einer Sitzung mit Qwen3.x an einem lokalen OpenAI-kompatiblen Server
 - die Wiederaufnahme der Sitzung liest etwa 36.000–44.000 Token
 - jeder frühere Zug bleibt über Werkzeuge erreichbar
 
+In der 12-Tage-Sitzung aus der Grafik oben, ebenfalls mit einem lokalen Qwen-Modell, senkt ein Schnitt den
+Kontext von etwa 213.000 Token auf im Median etwa 67.000 im nächsten Request; rund 38.000 davon sind die
+Zusammenfassung, der Rest sind Systemprompt und wörtlich Erhaltenes. Zwischen den Schnitten hält der Prefix-Cache (KV-Cache)
+des Servers: Im Median-Request kamen 99,8 % der Prompt-Token daraus. Der Request direkt nach einem Schnitt
+hat nur noch den Systemprompt im Cache und liest einmalig etwa 62.000 Token neu. Eingespart wird der Lauf
+zur Neu-Zusammenfassung, nicht dieses erneute Einlesen.
+
 Praxisbeispiel: [64kdemo](https://github.com/sebion7125/64kdemo), eine prozedurale Waldlandschaft in C und OpenGL, mit Bildern, Kamerafahrt und Entstehungsgeschichte. Die ersten zehn Sitzungen liefen ohne die Erweiterung und endeten immer wieder in Kontextvergiftung; mit der Erweiterung blieb es ab dem Baumsystem eine einzige Sitzung, die oben gemessene.
 
 ## Ablauf

@@ -25,6 +25,13 @@ Measured in one session with Qwen3.x on a local OpenAI-compatible server (2× RT
 - resuming the session reads about 36,000–44,000 tokens
 - every earlier turn stays reachable through tools
 
+In the 12-day session shown in the chart above, also with a local Qwen model, a cut takes the context
+from about 213,000 tokens to a median of about 67,000 in the next request; about 38,000 of those are the
+summary, the rest is the system prompt and what stays word for word. Between cuts the server's prefix (KV) cache holds: in the
+median request 99.8 % of the prompt tokens came from it. The request right after a cut has only the system
+prompt cached and re-reads about 62,000 tokens once. What the extension saves is the re-summarization
+pass, not that re-read.
+
 Practical example: [64kdemo](https://github.com/sebion7125/64kdemo), a procedural forest landscape in C and OpenGL, with screenshots, a camera flight and the story of how it came about. Its first ten sessions ran without the extension and kept ending in context poisoning; with the extension, from the tree system on, it stayed a single session, the one measured above.
 
 ## How it works

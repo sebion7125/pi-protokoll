@@ -1,6 +1,6 @@
 {
 	"name": "pi-protokoll",
-	"version": "0.9.9",
+	"version": "0.9.10",
 	"description": "Pi extension: a running per-turn protocol replaces summarizing compaction – fast, bounded compaction for very long sessions with local models",
 	"type": "module",
 	"license": "MIT",
@@ -18,7 +18,14 @@
 		"pi-extension",
 		"compaction",
 		"context",
-		"local-llm"
+		"local-llm",
+		"context-compaction",
+		"prompt-cache",
+		"kv-cache",
+		"incremental-summary",
+		"long-sessions",
+		"llama.cpp",
+		"ollama"
 	],
 	"pi": {
 		"extensions": [
