@@ -36,6 +36,7 @@ import {
 	indexBudget,
 	interruptedRequest,
 	isUnsupportedModelCall,
+	isUserInput,
 	LONG_CHAT_NOTE,
 	loadConfig,
 	mergeConfig,
@@ -60,6 +61,7 @@ import {
 	SWITCH_MESSAGE,
 	searchTurns,
 	sectionKnownToBranch,
+	serializeTurn,
 	sessionEnabled,
 	sessionState,
 	splitList,
@@ -72,6 +74,7 @@ import {
 	toolCallFiles,
 	touchedFiles,
 	turnHasWork,
+	turnUserText,
 } from "../src/core.ts";
 
 let seq = 0;
@@ -841,6 +844,62 @@ describe("context edits", () => {
 	function serializeTurnText(entries: PlainEntry[]) {
 		return entries.map((e) => JSON.stringify(e.message?.content ?? "")).join(" ");
 	}
+});
+
+describe("answers from a question tool", () => {
+	const answers = (text: string): PlainEntry => ({
+		id: id(),
+		type: "custom_message",
+		customType: "pi-web.ask.answers",
+		content: text,
+	});
+
+	it("starts a turn even when a tool result sits before it", () => {
+		const branch: PlainEntry[] = [
+			user("q"),
+			assistant("questions posted", { name: "ask_user", arguments: { questions: [] } }),
+			tool("ask_user", "Posted 11 questions. Ending this run."),
+			answers("The user submitted answers.\n\n- target: selected lifetime"),
+			assistant("implementing"),
+		];
+		const turns = collectTurns(branch);
+		expect(turns).toHaveLength(2);
+		expect(turns[1].entries[0].message).toBeUndefined();
+		expect(isUserInput(turns[1].entries[0])).toBe(true);
+	});
+
+	it("keeps the answers in the turn's own text, and in the condensation of that turn", () => {
+		const branch: PlainEntry[] = [
+			user("q"),
+			assistant("questions posted", { name: "ask_user", arguments: { questions: [] } }),
+			tool("ask_user", "Posted 11 questions. Ending this run."),
+			answers("The user submitted answers.\n\n- mechanism: selected amend"),
+			assistant("working on it"),
+		];
+		const turn = collectTurns(branch)[1];
+		expect(turnUserText(turn.entries, 4000)).toContain("selected amend");
+		expect(serializeTurn(turn.entries, 400)).toContain("selected amend");
+		const block = renderDetailBlock(turn, undefined, {
+			config: DEFAULT_CONFIG,
+			pinned: false,
+			inProgress: true,
+			entries: turn.entries,
+		});
+		expect(block).toContain("selected amend");
+	});
+
+	it("leaves a harness note out of the condensation", () => {
+		const note: PlainEntry = {
+			id: "n1",
+			type: "custom_message",
+			customType: "subsession.completion",
+			content: "Subsession 01a1c231 is now idle.",
+		};
+		const branch: PlainEntry[] = [user("q"), assistant("working"), note, assistant("done")];
+		const turn = collectTurns(branch)[0];
+		expect(turn.entries).toHaveLength(4);
+		expect(serializeTurn(turn.entries, 400)).not.toContain("subsession");
+	});
 });
 
 describe("index of older turns", () => {

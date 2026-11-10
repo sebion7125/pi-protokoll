@@ -37,7 +37,9 @@ Practical example: [64kdemo](https://github.com/sebion7125/64kdemo), a procedura
 ## How it works
 
 A *turn* is one agent run: your message with all tool rounds up to the final answer.
-Messages you send while the model is working belong to the running turn.
+Messages you send while the model is working belong to the running turn. Answers a question tool
+delivers as a `custom_message` (the user's own input through a package, such as pi-web's `ask_user`)
+start the turn that works with them, and their text is kept verbatim with `keepUserMessages`.
 
 1. **System prompt.** A fixed section asks the model to end every final answer with a
    `<protocol>` block: `result`, `decision`, `files`, `open`, `rule`, `revoke`, `index`, `tags`.
@@ -184,7 +186,7 @@ The German command names of earlier versions (`zeigen`, `anheften`, `lösen`, `a
 | `stateOfWork` | `true` | `false`: no state of work, so no fold requests at compaction (the slowest step) and nothing the model rewrites. The index takes the status budget the text would have had and keeps single lines for more turns; older turns stay reachable through the index and the lookup tools. Earlier summaries written by Pi itself are not merged then. Switching it back on folds the turns that left the detail tier in the meantime |
 | `keepRecentTurns` | `3` | keep this many last turns verbatim … |
 | `keepRecentPercent` | `10` | … but at most this share of the context window |
-| `keepUserMessages` | `true` | your messages verbatim in the detail tier |
+| `keepUserMessages` | `true` | your messages verbatim in the detail tier, including the answers a question tool delivered as `custom_message` |
 | `userMessageMaxChars` | `4000` | longer messages (pasted logs) are shortened there |
 | `lookupTool` | `true` | offer `protocol_turn` and `protocol_read`; like `protocol_search` they are declared only once the session holds a compaction, because before that every turn is still in the context |
 | `lookupMaxTokens` | `8000` | output limit of those tools |

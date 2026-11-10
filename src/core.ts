@@ -789,8 +789,20 @@ export interface Turn {
 	entries: PlainEntry[];
 }
 
+/**
+ * Custom messages that carry the user's own input through a package (the answers to a web
+ * question tool). Pi stores them as `custom_message` with the text at the top level, so they look
+ * like notes from the harness and are not counted as user input. Their text is the user's decision
+ * and the only record of it, so it must survive a condensation.
+ */
+const USER_INPUT_CUSTOM_TYPES = new Set(["pi-web.ask.answers"]);
+
+export function isUserInput(e: PlainEntry): boolean {
+	return e.type === "custom_message" && USER_INPUT_CUSTOM_TYPES.has(e.customType ?? "");
+}
+
 export function isUserMessage(e: PlainEntry): boolean {
-	return e.type === "message" && e.message?.role === "user";
+	return (e.type === "message" && e.message?.role === "user") || isUserInput(e);
 }
 
 /**
@@ -828,7 +840,9 @@ export function collectTurns(branch: PlainEntry[]): Turn[] {
 		const e = branch[i];
 		const current = turns[turns.length - 1];
 		if (omitted.has(e.id) && !isUserMessage(e)) continue;
-		if (isUserMessage(e) && !(current && isSteering(branch, i))) {
+		// answers to a question tool arrive after that run ended, so the tool result before them is
+		// not steering: the answers start the turn that works with them
+		if (isUserInput(e) || (isUserMessage(e) && !(current && isSteering(branch, i)))) {
 			turns.push({ number: turns.length + 1, userEntryId: e.id, userEntryIds: [e.id], index: i, entries: [e] });
 		} else if (current) {
 			current.entries.push(e);
@@ -915,7 +929,7 @@ export function turnUserText(entries: PlainEntry[], maxChars = Infinity, note = 
 	const parts: string[] = [];
 	for (const e of entries) {
 		if (!isUserMessage(e)) continue;
-		const text = clip(contentText(e.message?.content), maxChars, note);
+		const text = clip(contentText(e.type === "custom_message" ? e.content : e.message?.content), maxChars, note);
 		parts.push(parts.length ? `[while the assistant worked] ${text}` : text);
 	}
 	return parts.join("\n");
@@ -1086,6 +1100,11 @@ export function serializeTurn(entries: PlainEntry[], toolResultChars: number, as
 	for (const e of entries) {
 		if (e.type === "branch_summary" && e.summary) {
 			parts.push(`[Summary of a side branch the user left]: ${e.summary}`);
+			continue;
+		}
+		if (isUserInput(e)) {
+			const text = contentText(e.content);
+			if (text) parts.push(`[User answered]: ${clip(text, 1200, "shortened")}`);
 			continue;
 		}
 		if (e.type !== "message" || !e.message) continue;

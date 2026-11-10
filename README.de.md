@@ -40,7 +40,9 @@ Praxisbeispiel: [64kdemo](https://github.com/sebion7125/64kdemo), eine prozedura
 
 Ein *Zug* ist ein Arbeitslauf: deine Nachricht samt allen Werkzeugrunden bis zur
 abschließenden Antwort. Nachrichten, die du schreibst, während das Modell noch arbeitet,
-gehören zum laufenden Zug.
+gehören zum laufenden Zug. Antworten, die ein Frage-Werkzeug als `custom_message` liefert
+(eigener Input des Nutzers durch ein Paket, etwa `ask_user` von pi-web), beginnen den Zug, der
+mit ihnen arbeitet; ihr Text bleibt mit `keepUserMessages` im Wortlaut erhalten.
 
 1. **Systemprompt.** Ein fester Abschnitt bittet das Modell, jede abschließende Antwort mit
    einem `<protocol>`-Block zu beenden: `result`, `decision`, `files`, `open`, `rule`, `revoke`,
