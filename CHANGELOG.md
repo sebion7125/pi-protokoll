@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Answers from a question tool count as user input** (#3, thanks @Tutanchamon). A package that asks the user questions in a web UI (pi-web's `ask_user`) stores the answers as a `custom_message`; they were neither a turn start nor part of any user text, so the next compaction dropped them and every later summary kept saying the answers were pending. They now start the turn that works with them, are kept verbatim with `keepUserMessages`, and `protocol_turn` returns them.
+- A state of work written in the old version-2 numbering is renumbered with the counting rule of that time, so the answers do not shift its turn references.
+- **Sessions that already contain such answers and were compacted before this version:** the answers now start their own turn, so the turn numbers in the stored state of work are off by one from that point. Run `/protokoll rebuild` once; the next compaction rebuilds the state from the protocols with the new numbering.
+
 ## 0.9.10 – 2026-11-08
 
 - Both READMEs state what a compaction does to the context and the prefix cache, measured on the session in the chart: about 213,000 → a median of 67,000 tokens in the next request (about 38,000 of them the summary), 99.8 % of the prompt tokens from the cache in the median request, about 62,000 tokens read again once right after a cut.
