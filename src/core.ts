@@ -1485,7 +1485,9 @@ export function latestFoldState(branch: PlainEntry[], before: number): FoldState
 
 /** Converts a state written when every user message counted as a turn to the run numbering. */
 export function renumberLegacyState(branch: PlainEntry[], state: FoldState): FoldState {
-	const userIds = branch.filter(isUserMessage).map((e) => e.id);
+	// a version-2 state was written when only plain user messages counted, so its numbers are read
+	// with that rule: answers from a question tool (isUserInput) did not count then
+	const userIds = branch.filter((e) => e.type === "message" && e.message?.role === "user").map((e) => e.id);
 	const numberOf = new Map<string, number>();
 	for (const t of collectTurns(branch)) for (const id of t.userEntryIds) numberOf.set(id, t.number);
 	const map = (old: number) => numberOf.get(userIds[old - 1] ?? "") ?? old;

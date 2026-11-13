@@ -868,6 +868,28 @@ describe("answers from a question tool", () => {
 		expect(isUserInput(turns[1].entries[0])).toBe(true);
 	});
 
+	it("does not count the answers when it renumbers a version-2 state", () => {
+		const a = user("a");
+		const b = user("b");
+		const c = user("c");
+		const branch: PlainEntry[] = [
+			a,
+			assistant("done a"),
+			b,
+			assistant("questions posted", { name: "ask_user", arguments: { questions: [] } }),
+			tool("ask_user", "Posted 2 questions. Ending this run."),
+			answers("The user submitted answers.\n\n- colour: selected green"),
+			assistant("done with the answers"),
+			c,
+			assistant("done c"),
+		];
+		// old numbering: a=1, b=2, c=3 (the answers did not count); new runs: a=1, b=2, answers=3, c=4
+		const state: FoldState = { version: 2, narrative: "c handled [T3]", folded: "1-3", foreignConsumed: [] };
+		const s3 = renumberLegacyState(branch, state);
+		expect(s3.narrative).toBe("c handled [T4]");
+		expect(s3.folded).toBe("1-2,4");
+	});
+
 	it("keeps the answers in the turn's own text, and in the condensation of that turn", () => {
 		const branch: PlainEntry[] = [
 			user("q"),
