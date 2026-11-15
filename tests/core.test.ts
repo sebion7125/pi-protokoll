@@ -1417,6 +1417,18 @@ describe("recall: what the summary still holds of old turns", () => {
 		expect(recallCandidates(turns, protocols, turns[7].index).map((t) => t.number)).toEqual([1, 2, 3, 4, 5, 6, 7]);
 	});
 
+	it("keeps only the eligible turns and skips user messages too short to name a subject", () => {
+		const branch = withProtocols(4);
+		const shortOne = user("yes, go ahead");
+		branch.push(shortOne, assistant("done"), protocol(shortOne.id, 5, "result: migration applied"));
+		const turns = collectTurns(branch);
+		const protocols = collectProtocols(branch);
+		expect(recallCandidates(turns, protocols, branch.length).map((t) => t.number)).toEqual([1, 2, 3, 4]);
+		// only turns left as index lines (outside the detail tier) are asked about
+		const eligible = new Set([turns[0].userEntryId, turns[2].userEntryId]);
+		expect(recallCandidates(turns, protocols, branch.length, eligible).map((t) => t.number)).toEqual([1, 3]);
+	});
+
 	it("skips turns whose protocol holds neither a result nor a decision", () => {
 		const bare = user("nothing recorded here");
 		const branch: PlainEntry[] = [bare, assistant("ok"), protocol(bare.id, 1, "tags: none"), ...withProtocols(3, 2)];

@@ -1705,10 +1705,33 @@ export default function protokoll(pi: ExtensionAPI) {
 		// the same boundary /protokoll show uses: everything before it is gone from the context
 		const keepFrom = turns.length > config.keepRecentTurns ? turns[turns.length - config.keepRecentTurns] : undefined;
 		const cutIndex = keepFrom ? keepFrom.index : branch.length;
-		const candidates = recallCandidates(turns, protocols, cutIndex);
-		if (!candidates.length) {
+		if (!recallCandidates(turns, protocols, cutIndex).length) {
 			ctx.ui.notify(
 				"protokoll recall: nothing to ask – every turn with a protocol is still in the context word for word",
+				"warning",
+			);
+			return;
+		}
+		const signal = ctx.signal;
+		const stop = () => {
+			if (signal?.aborted) ctx.ui.notify("protokoll recall: aborted", "warning");
+			return signal?.aborted === true;
+		};
+		if (opts.fold)
+			ctx.ui.notify("protokoll recall: updating the state of work with the model first (--fold)", "info");
+		const a = await assemble(branch, cutIndex, false, ctx, opts.fold, signal, undefined, undefined);
+		if (stop()) return;
+		const b = await assemble(branch, cutIndex, false, ctx, false, signal, undefined, undefined, {
+			stateOfWork: false,
+		});
+		if (stop()) return;
+		// only turns the summary no longer quotes in its detail tier: there the protocol stands word
+		// for word, so the answer would be in the context with and without the state of work
+		const older = new Set(a.plan.older.map((t) => t.userEntryId));
+		const candidates = recallCandidates(turns, protocols, cutIndex, older);
+		if (!candidates.length) {
+			ctx.ui.notify(
+				"protokoll recall: nothing to ask – the turns that left the context are all still quoted in the detail tier of the summary",
 				"warning",
 			);
 			return;
@@ -1719,25 +1742,13 @@ export default function protokoll(pi: ExtensionAPI) {
 			question: recallQuestion(turnUserText(t.entries)),
 			expected: recallExpected(protocols.get(t.userEntryId)),
 		}));
-		const signal = ctx.signal;
-		const stop = () => {
-			if (signal?.aborted) ctx.ui.notify("protokoll recall: aborted", "warning");
-			return signal?.aborted === true;
-		};
 		ctx.ui.notify(
 			`protokoll recall: ${items.length} items × 2 contexts = ${items.length * 2} model calls` +
-				(opts.judge ? ` + ${items.length} for judging` : "") +
-				(opts.fold ? " (+ the fold requests of the state of work)" : " (no fold: the stored state is used)") +
-				` · ${candidates.length} of ${turns.length} turns are candidates`,
+				(opts.judge ? ` + ${items.length * 2} for judging` : "") +
+				(opts.fold ? " (the state of work was updated with the model)" : " (no fold: the stored state is used)") +
+				` · ${candidates.length} of ${turns.length} turns are candidates (outside the detail tier)`,
 			"info",
 		);
-
-		const a = await assemble(branch, cutIndex, false, ctx, opts.fold, signal, undefined, undefined);
-		if (stop()) return;
-		const b = await assemble(branch, cutIndex, false, ctx, false, signal, undefined, undefined, {
-			stateOfWork: false,
-		});
-		if (stop()) return;
 
 		const verbatim = recallVerbatim(
 			turns.filter((t) => t.index >= cutIndex),
@@ -2123,10 +2134,14 @@ export default function protokoll(pi: ExtensionAPI) {
 						const i = rest.indexOf(`--${name}`);
 						return i >= 0 ? rest[i + 1] : undefined;
 					};
-					const n = Number.parseInt(rest.find((arg) => /^\d+$/.test(arg)) ?? "", 10);
+					// the count is the first plain number that is not the value of --seed or --file
+					const values = new Set(["--seed", "--file"].map((f) => rest.indexOf(f) + 1).filter((i) => i > 0));
+					const n = Number.parseInt(rest.find((arg, i) => !values.has(i) && /^\d+$/.test(arg)) ?? "", 10);
+					if (Number.isFinite(n) && n > RECALL_MAX_ITEMS)
+						ctx.ui.notify(`protokoll recall: at most ${RECALL_MAX_ITEMS} items per run`, "warning");
 					const count = Math.max(1, Math.min(Number.isFinite(n) ? n : RECALL_DEFAULT_ITEMS, RECALL_MAX_ITEMS));
 					await runRecall(
-						Number.isFinite(n) ? n : RECALL_DEFAULT_ITEMS,
+						count,
 						{
 							fold: rest.includes("--fold"),
 							judge: rest.includes("--judge"),
@@ -2135,8 +2150,6 @@ export default function protokoll(pi: ExtensionAPI) {
 						},
 						ctx,
 					);
-					if (count > RECALL_MAX_ITEMS)
-						ctx.ui.notify(`protokoll recall: at most ${RECALL_MAX_ITEMS} items per run`, "warning");
 					return;
 				}
 				case "reload": {

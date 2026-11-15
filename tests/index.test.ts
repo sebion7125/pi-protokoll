@@ -1176,18 +1176,22 @@ describe("protokoll extension", () => {
 	});
 
 	it("asks every recall question twice and sends no tools with it", async () => {
-		h = harness([
-			"a1\n<protocol>result: sensor 1 calibrated to 0.4 ms</protocol>",
-			"a2\n<protocol>result: sensor 2 calibrated to 0.4 ms</protocol>",
-			"a3\n<protocol>result: sensor 3 calibrated to 0.4 ms</protocol>",
-			"a4\n<protocol>result: sensor 4 calibrated to 0.4 ms</protocol>",
-			"a5\n<protocol>result: sensor 5 calibrated to 0.4 ms</protocol>",
-			"a6\n<protocol>result: sensor 6 calibrated to 0.4 ms</protocol>",
-			"it was calibrated to 0.4 ms",
-			"not in my memory",
-			"the drift was fixed",
-			"i cannot answer that",
-		]);
+		// a small detail tier, so the older turns are left only as index lines: those are the ones asked about
+		h = harness(
+			[
+				"a1\n<protocol>result: sensor 1 calibrated to 0.4 ms</protocol>",
+				"a2\n<protocol>result: sensor 2 calibrated to 0.4 ms</protocol>",
+				"a3\n<protocol>result: sensor 3 calibrated to 0.4 ms</protocol>",
+				"a4\n<protocol>result: sensor 4 calibrated to 0.4 ms</protocol>",
+				"a5\n<protocol>result: sensor 5 calibrated to 0.4 ms</protocol>",
+				"a6\n<protocol>result: sensor 6 calibrated to 0.4 ms</protocol>",
+				"it was calibrated to 0.4 ms",
+				"not in my memory",
+				"the drift was fixed",
+				"i cannot answer that",
+			],
+			{ detailMaxTokens: 20, keepRecentTurns: 1, consolidate: false },
+		);
 		await h.fire("session_start", { reason: "startup" });
 		for (let i = 1; i <= 6; i++)
 			await h.turn(
@@ -1231,6 +1235,22 @@ describe("protokoll extension", () => {
 		expect(md).toContain("Expected (from the protocol):");
 		expect(md).toContain("Answer A:");
 		expect(md).toContain("Answer B:");
+	});
+
+	it("does not take the value of --seed as the number of items, and says when it caps the count", async () => {
+		h = harness([], { detailMaxTokens: 60, consolidate: false });
+		await h.fire("session_start", { reason: "startup" });
+		for (let i = 1; i <= 8; i++)
+			await h.turn(
+				`question ${i}: why does the sensor drift?`,
+				`a${i}\n<protocol>result: sensor ${i} calibrated to 0.4 ms</protocol>`,
+			);
+		await h.commands.get("protokoll").handler("recall --seed 1", h.ctx);
+		const first = h.branch.filter((e) => e.customType === "protokoll-recall").at(-1)?.data as any;
+		// the default count, not 1 from --seed
+		expect(first.items).toBeGreaterThan(1);
+		await h.commands.get("protokoll").handler("recall 50", h.ctx);
+		expect(h.notes.some((n) => n.includes("at most 20 items per run"))).toBe(true);
 	});
 
 	it("refuses to recall while the agent is still working", async () => {

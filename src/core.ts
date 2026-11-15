@@ -2694,6 +2694,8 @@ export const RECALL_PARTIAL = 0.1;
 export const RECALL_QUESTION_CHARS = 300;
 /** answer budget of one recall request, also the room kept free in the window check */
 export const RECALL_ANSWER_TOKENS = 300;
+/** shorter user messages ("yes, go ahead") give no question that names the subject */
+export const RECALL_MIN_USER_CHARS = 20;
 
 export interface RecallItem {
 	turn: number;
@@ -2716,10 +2718,24 @@ export function recallExpected(protocol: ProtocolEntryData | undefined): string 
 
 /**
  * Turns the model can no longer read word for word and that have something to be asked about:
- * before the cut and with a protocol that states a result or a decision.
+ * before the cut, with a protocol that states a result or a decision, and with a user message long
+ * enough to name the subject. `eligible` (user entry ids) narrows them further: the recall command
+ * passes the turns that are left only as an index line or in the state of work, because the detail
+ * tier quotes the protocol itself, so asking about those turns would test nothing.
  */
-export function recallCandidates(turns: Turn[], protocols: Map<string, ProtocolEntryData>, cutIndex: number): Turn[] {
-	return turns.filter((t) => t.index < cutIndex && recallExpected(protocols.get(t.userEntryId)) !== "");
+export function recallCandidates(
+	turns: Turn[],
+	protocols: Map<string, ProtocolEntryData>,
+	cutIndex: number,
+	eligible?: Set<string>,
+): Turn[] {
+	return turns.filter(
+		(t) =>
+			t.index < cutIndex &&
+			(!eligible || eligible.has(t.userEntryId)) &&
+			recallExpected(protocols.get(t.userEntryId)) !== "" &&
+			turnUserText(t.entries).trim().length >= RECALL_MIN_USER_CHARS,
+	);
 }
 
 /**
