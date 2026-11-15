@@ -1175,6 +1175,77 @@ describe("protokoll extension", () => {
 		);
 	});
 
+	it("asks every recall question twice and sends no tools with it", async () => {
+		h = harness([
+			"a1\n<protocol>result: sensor 1 calibrated to 0.4 ms</protocol>",
+			"a2\n<protocol>result: sensor 2 calibrated to 0.4 ms</protocol>",
+			"a3\n<protocol>result: sensor 3 calibrated to 0.4 ms</protocol>",
+			"a4\n<protocol>result: sensor 4 calibrated to 0.4 ms</protocol>",
+			"a5\n<protocol>result: sensor 5 calibrated to 0.4 ms</protocol>",
+			"a6\n<protocol>result: sensor 6 calibrated to 0.4 ms</protocol>",
+			"it was calibrated to 0.4 ms",
+			"not in my memory",
+			"the drift was fixed",
+			"i cannot answer that",
+		]);
+		await h.fire("session_start", { reason: "startup" });
+		for (let i = 1; i <= 6; i++)
+			await h.turn(
+				`question ${i}: why does the sensor drift?`,
+				`a${i}\n<protocol>result: sensor ${i} calibrated to 0.4 ms</protocol>`,
+			);
+		const before = h.requests.length;
+		const branchBefore = h.branch.length;
+		await h.commands.get("protokoll").handler("recall 2", h.ctx);
+
+		const mine = h.requests.slice(before);
+		// two requests per item: one against the summary as it stands, one without the state of work
+		expect(mine).toHaveLength(4);
+		for (const r of mine) {
+			expect(r.context.messages).toHaveLength(1);
+			expect(r.context.messages[0].role).toBe("user");
+			expect(r.context.messages[0].content).toContain("Earlier in this session I asked:");
+			expect(r.context.tools).toBeUndefined();
+			expect(r.options.tools).toBeUndefined();
+			expect(r.options.maxTokens).toBe(300);
+		}
+		// the question quotes the user, never the protocol of the turn it asks about
+		expect(mine[0].context.messages[0].content).toContain("why does the sensor drift");
+
+		// the session keeps everything it had and gains exactly one entry
+		expect(h.branch.filter((e) => e.customType === "protokoll-recall")).toHaveLength(1);
+		expect(h.branch.length).toBe(branchBefore + 1);
+		const stored = h.branch.find((e) => e.customType === "protokoll-recall")?.data as any;
+		expect(stored.items).toBe(2);
+		expect(stored.turns).toHaveLength(2);
+		expect(stored.modelCalls).toBe(4);
+		expect(stored.fold).toBe(false);
+
+		// --file writes the whole comparison, not only the counts
+		const file = join(h.ctx.cwd, "recall.md");
+		await h.commands.get("protokoll").handler(`recall 1 --file ${file}`, h.ctx);
+		expect(h.notes.at(-1)).toContain(`report written: ${file}`);
+		const md = readFileSync(file, "utf8");
+		expect(md).toContain("# protokoll recall");
+		expect(md).toContain("Question: Earlier in this session I asked:");
+		expect(md).toContain("Expected (from the protocol):");
+		expect(md).toContain("Answer A:");
+		expect(md).toContain("Answer B:");
+	});
+
+	it("refuses to recall while the agent is still working", async () => {
+		await h.turn("q", "a\n<protocol>result: r</protocol>");
+		h.ctx.isIdle = () => false;
+		const before = h.requests.length;
+		await h.commands.get("protokoll").handler("recall 3", h.ctx);
+		expect(h.requests.length).toBe(before);
+		expect(h.notes.at(-1)).toContain("the agent is still working");
+	});
+
+	it("offers recall in the argument completions", () => {
+		expect(h.commands.get("protokoll").getArgumentCompletions("rec")).toEqual([{ value: "recall", label: "recall" }]);
+	});
+
 	it("counts compactions in the status", async () => {
 		await h.turn("q1", "a1\n<protocol>result: r1</protocol>");
 		h.branch.push({ id: "k1", type: "compaction", summary: "s", details: { protokoll: true } } as PlainEntry);

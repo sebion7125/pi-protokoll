@@ -26,6 +26,7 @@ import {
 	diagnosticAppendix,
 	ENABLED_NOTE,
 	editedAway,
+	emptyFields,
 	encodeRanges,
 	extractBlock,
 	FOLLOW_UP_PROMPT,
@@ -56,6 +57,19 @@ import {
 	parseSupplement,
 	planCompaction,
 	progressRequest,
+	RECALL_QUESTION_CHARS,
+	type RecallItem,
+	type RecallTurnResult,
+	recallCandidates,
+	recallExpected,
+	recallJudgeScore,
+	recallPick,
+	recallQuestion,
+	recallReport,
+	recallSaysUnknown,
+	recallScore,
+	recallTotals,
+	recallVerbatim,
 	renderDetailBlock,
 	renderStatus,
 	renderSummary,
@@ -79,6 +93,7 @@ import {
 	switchEntries,
 	switchNoteSeen,
 	systemPromptSection,
+	type Turn,
 	tok,
 	toolCallFiles,
 	touchedFiles,
@@ -1379,5 +1394,116 @@ describe("stats: numbers per compaction", () => {
 		);
 		// a session written without usage fields reports that instead of zeros
 		expect(collectUsageStats([user("q"), assistant("a")])).toEqual({ requests: 0, cached: 0 });
+	});
+});
+
+describe("recall: what the summary still holds of old turns", () => {
+	const withProtocols = (n: number, from = 1): PlainEntry[] => {
+		const out: PlainEntry[] = [];
+		for (let i = from; i < from + n; i++) {
+			const u = user(`why does sensor ${i} drift?`);
+			out.push(u, assistant("looking"), protocol(u.id, i, `result: sensor ${i} calibrated to 0.4 ms`));
+		}
+		return out;
+	};
+
+	it("takes only turns that left the context and state a result or a decision", () => {
+		const branch = withProtocols(7);
+		const bare = user("and the cache?");
+		branch.push(bare, assistant("no"), protocol(bare.id, 8, "tags: cache"));
+		const turns = collectTurns(branch);
+		const protocols = collectProtocols(branch);
+		// the cut sits at turn 8: everything before it is out of the context
+		expect(recallCandidates(turns, protocols, turns[7].index).map((t) => t.number)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+	});
+
+	it("skips turns whose protocol holds neither a result nor a decision", () => {
+		const bare = user("nothing recorded here");
+		const branch: PlainEntry[] = [bare, assistant("ok"), protocol(bare.id, 1, "tags: none"), ...withProtocols(3, 2)];
+		const turns = collectTurns(branch);
+		const protocols = collectProtocols(branch);
+		expect(recallCandidates(turns, protocols, branch.length).map((t) => t.number)).toEqual([2, 3, 4]);
+	});
+
+	it("spreads the items over the session and picks the same ones every time", () => {
+		const cands = Array.from({ length: 7 }, (_, i) => ({ number: i + 1 }) as Turn);
+		expect(recallPick(cands, 3).map((t) => t.number)).toEqual([2, 4, 6]);
+		expect(recallPick(cands, 3).map((t) => t.number)).toEqual([2, 4, 6]);
+		// a seed rotates the list instead of picking at random
+		expect(recallPick(cands, 3, 1).map((t) => t.number)).toEqual([3, 5, 7]);
+		expect(recallPick(cands, 50)).toHaveLength(7);
+		const many = Array.from({ length: 40 }, (_, i) => ({ number: i + 1 }) as Turn);
+		expect(recallPick(many, 50)).toHaveLength(20);
+	});
+
+	it("asks in the user's own words, without the turn number and without the protocol", () => {
+		const q = recallQuestion("why does sensor 4 drift, and what did we change?");
+		expect(q).toContain("Earlier in this session I asked:");
+		expect(q).toContain("why does sensor 4 drift");
+		expect(q).toContain("What was the result or decision?");
+		expect(q).not.toContain("calibrated");
+		const long = recallQuestion("drift ".repeat(1000));
+		expect(long.length).toBeLessThan(RECALL_QUESTION_CHARS + 140);
+		expect(long).toContain("shortened");
+	});
+
+	it("expects result and decision, nothing else of the protocol", () => {
+		const p: ProtocolEntryData = {
+			version: 1,
+			userEntryId: "u1",
+			turn: 3,
+			source: "inline",
+			fields: { ...emptyFields(), result: ["fixed the drift"], decision: ["use 0.4 ms"], open: ["later"] },
+		};
+		expect(recallExpected(p)).toBe("fixed the drift\nuse 0.4 ms");
+		expect(recallExpected({ ...p, fields: { ...emptyFields(), tags: ["x"] } })).toBe("");
+		expect(recallExpected(undefined)).toBe("");
+	});
+
+	it("scores the same facts as a hit, other text as a miss and not-knowing as zero", () => {
+		const expected = "sensor calibrated to 0.4 ms";
+		expect(recallScore("the sensor was calibrated to 0.4 ms", expected).verdict).toBe("hit");
+		expect(recallScore("we painted the garage", expected).similarity).toBe(0);
+		expect(recallScore("sensor drift reduced", expected).verdict).toBe("partial");
+		const unknown = recallScore("I don't know – that is not in the context.", expected);
+		expect(unknown.similarity).toBe(0);
+		expect(unknown.unknown).toBe(true);
+		expect(unknown.verdict).toBe("miss");
+		expect(recallScore(undefined, expected).verdict).toBe("miss");
+		expect(recallSaysUnknown("there is no record of that here")).toBe(true);
+		expect(recallSaysUnknown("the sensor reads 0.4 ms now")).toBe(false);
+		expect(recallJudgeScore("Answer: 2")).toBe(2);
+		expect(recallJudgeScore("I cannot rate this")).toBeUndefined();
+	});
+
+	it("sums up a mixed run and shows both sides of the comparison", () => {
+		const expected = "sensor calibrated to 0.4 ms";
+		const item = (turn: number): RecallItem => ({ turn, userEntryId: `u${turn}`, question: "q?", expected });
+		const hit = recallScore("the sensor was calibrated to 0.4 ms", expected);
+		const miss = recallScore("I don't know", expected);
+		const rows: RecallTurnResult[] = [
+			{ item: item(3), a: hit, b: miss },
+			{ item: item(9), a: miss, b: miss },
+		];
+		const totalsA = recallTotals(rows.map((r) => r.a));
+		expect(totalsA.hits).toBe(1);
+		expect(totalsA.misses).toBe(1);
+		expect(totalsA.mean).toBeGreaterThan(0);
+		const text = recallReport(rows, { fold: false, modelCalls: 4 }).join("\n");
+		expect(text).toContain("A: 1 hits, 0 partial, 1 misses");
+		expect(text).toContain("B: 0 hits, 0 partial, 2 misses");
+		expect(text).toContain("model calls: 4");
+		expect(text).toContain("stored state of work was used as it is, without a model call");
+		expect(text).toContain("## Turn 3 — A: hit");
+		expect(text).toContain("Answer A: the sensor was calibrated to 0.4 ms");
+		// with --fold the report says the state was folded for the run
+		expect(recallReport(rows, { fold: true, modelCalls: 9 }).join("\n")).toContain("folded with the model");
+	});
+
+	it("puts the turns that are still verbatim behind the summary", () => {
+		const text = recallVerbatim(collectTurns([user("first question"), assistant("answer")]), cfg());
+		expect(text).toContain("Turns still in the context word for word");
+		expect(text).toContain("first question");
+		expect(recallVerbatim([], cfg())).toBe("");
 	});
 });

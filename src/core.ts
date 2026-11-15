@@ -2658,3 +2658,252 @@ export function statsSummary(stats: SessionStats): string {
 	parts.push(t.usage.requests ? `cache ${t.usage.cached}/${t.usage.requests}` : "no usage data");
 	return parts.join(" · ");
 }
+
+// ---------------------------------------------------------------- /protokoll recall
+
+/**
+ * What one `/protokoll recall` run measured. A custom entry, so it is never part of a context sent
+ * to the model; it only makes later runs comparable.
+ */
+export const RECALL_ENTRY = "protokoll-recall";
+
+export interface RecallEntryData {
+	version: 1;
+	/** when the run happened */
+	at: string;
+	items: number;
+	/** the turns that were asked about */
+	turns: number[];
+	withState: RecallTotals;
+	withoutState: RecallTotals;
+	/** model calls the run took, including the fold when `--fold` was used */
+	modelCalls: number;
+	/** true: the state of work was folded with the model for this run */
+	fold: boolean;
+	/** the similarity from which an answer counts as a hit */
+	threshold: number;
+}
+
+export const RECALL_DEFAULT_ITEMS = 5;
+export const RECALL_MAX_ITEMS = 20;
+/** at this similarity the fact is considered still present in the context */
+export const RECALL_HIT = 0.25;
+/** below this the answer says something else than the protocol recorded */
+export const RECALL_PARTIAL = 0.1;
+/** how much of the user's own wording the question quotes */
+export const RECALL_QUESTION_CHARS = 300;
+/** answer budget of one recall request, also the room kept free in the window check */
+export const RECALL_ANSWER_TOKENS = 300;
+
+export interface RecallItem {
+	turn: number;
+	userEntryId: string;
+	question: string;
+	/** what the protocol of that turn recorded: result and decision */
+	expected: string;
+}
+
+/** The protocol's own claim about the turn – what an answer has to match. */
+export function recallExpected(protocol: ProtocolEntryData | undefined): string {
+	const f = protocol?.fields;
+	if (!f) return "";
+	return [...(f.result ?? []), ...(f.decision ?? [])]
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.join("\n")
+		.trim();
+}
+
+/**
+ * Turns the model can no longer read word for word and that have something to be asked about:
+ * before the cut and with a protocol that states a result or a decision.
+ */
+export function recallCandidates(turns: Turn[], protocols: Map<string, ProtocolEntryData>, cutIndex: number): Turn[] {
+	return turns.filter((t) => t.index < cutIndex && recallExpected(protocols.get(t.userEntryId)) !== "");
+}
+
+/**
+ * `n` items spread over the candidates in equal steps. Deterministic, so the same session and the
+ * same arguments give the same questions again; `seed` rotates the list first.
+ */
+export function recallPick(candidates: Turn[], n: number, seed = 0): Turn[] {
+	const wanted = Number.isFinite(n) && n > 0 ? Math.trunc(n) : RECALL_DEFAULT_ITEMS;
+	const count = Math.min(wanted, RECALL_MAX_ITEMS, candidates.length);
+	if (count <= 0) return [];
+	if (candidates.length <= count) return [...candidates];
+	const offset = Number.isFinite(seed) ? Math.abs(Math.trunc(seed)) % candidates.length : 0;
+	const list = offset ? [...candidates.slice(offset), ...candidates.slice(0, offset)] : candidates;
+	const out: Turn[] = [];
+	for (let i = 0; i < count; i++) out.push(list[Math.floor(((i + 0.5) * list.length) / count)]);
+	return out;
+}
+
+/**
+ * The question is built from the user's own words only – never from the protocol, and without the
+ * turn number, so it cannot hand the answer to the model or point it at the lookup tools.
+ */
+export function recallQuestion(userText: string): string {
+	const quoted = clip(userText.trim(), RECALL_QUESTION_CHARS, "shortened").replace(/\s+/g, " ").trim();
+	return `Earlier in this session I asked: «${quoted}». What was the result or decision?`;
+}
+
+/**
+ * The turns after the cut as transcripts. In a real session they are still there as messages; a
+ * recall request carries one text, so they are appended the way the detail tier holds them.
+ */
+export function recallVerbatim(turns: Turn[], config: ProtocolConfig): string {
+	if (!turns.length) return "";
+	return [
+		"## Turns still in the context word for word",
+		...turns.map((t) => `### Turn ${t.number}\n${serializeTurn(t.entries, config.userMessageMaxChars)}`),
+	].join("\n\n");
+}
+
+/** Phrases with which a model says it cannot see the turn any more. */
+const RECALL_UNKNOWN = [
+	"not in the context",
+	"not in my context",
+	"no longer in the context",
+	"nothing in the context",
+	"no information about",
+	"no information on",
+	"i don t know",
+	"i do not know",
+	"i cannot see",
+	"i can t see",
+	"i have no",
+	"no record of",
+	"no mention of",
+	"not mentioned",
+	"not stated",
+	"does not appear",
+	"doesn t appear",
+	"unable to find",
+	"cannot answer",
+	"can t answer",
+	"insufficient information",
+	"not available",
+];
+
+export function recallSaysUnknown(text: string): boolean {
+	// norm() drops the apostrophes, so "I don't know" is matched as "i don t know"
+	const s = ` ${norm(text)} `;
+	return RECALL_UNKNOWN.some((p) => s.includes(p));
+}
+
+export type RecallVerdict = "hit" | "partial" | "miss";
+
+export interface RecallAnswer {
+	text?: string;
+	similarity: number;
+	unknown: boolean;
+	verdict: RecallVerdict;
+	/** the model's own rating (0/1/2) when `--judge` was used */
+	judge?: number;
+}
+
+/** Scoring without a second model: an unknown answer is 0, otherwise the word overlap. */
+export function recallScore(answer: string | undefined, expected: string): RecallAnswer {
+	if (!answer || !answer.trim() || recallSaysUnknown(answer)) return { similarity: 0, unknown: true, verdict: "miss" };
+	const sim = similarity(answer, expected);
+	const verdict: RecallVerdict = sim >= RECALL_HIT ? "hit" : sim >= RECALL_PARTIAL ? "partial" : "miss";
+	return { text: answer, similarity: sim, unknown: false, verdict };
+}
+
+/** What the judge was asked, and how its answer is read. */
+export function recallJudgePrompt(expected: string, answer: string): string {
+	return (
+		"Rate the answer below against the text it should reflect.\n" +
+		"0 = wrong or says it does not know, 1 = partially right, 2 = states the same facts.\n" +
+		"Answer with a single digit.\n\nText: " +
+		expected +
+		"\n\nAnswer: " +
+		answer
+	);
+}
+
+export function recallJudgeScore(text: string | undefined): number | undefined {
+	const m = text ? /\b([012])\b/.exec(text) : undefined;
+	return m ? Number.parseInt(m[1], 10) : undefined;
+}
+
+export interface RecallTotals {
+	hits: number;
+	partial: number;
+	misses: number;
+	/** mean similarity over all items */
+	mean: number;
+}
+
+export function recallTotals(rows: RecallAnswer[]): RecallTotals {
+	if (!rows.length) return { hits: 0, partial: 0, misses: 0, mean: 0 };
+	const mean = rows.reduce((s, r) => s + r.similarity, 0) / rows.length;
+	return {
+		hits: rows.filter((r) => r.verdict === "hit").length,
+		partial: rows.filter((r) => r.verdict === "partial").length,
+		misses: rows.filter((r) => r.verdict === "miss").length,
+		mean: Math.round(mean * 1000) / 1000,
+	};
+}
+
+export interface RecallTurnResult {
+	item: RecallItem;
+	/** asked against the summary as it stands (with the state of work) */
+	a: RecallAnswer;
+	/** asked against the same summary without the state of work */
+	b: RecallAnswer;
+}
+
+const recallAnswerLine = (a: RecallAnswer): string =>
+	`${a.verdict} (similarity ${a.similarity.toFixed(2)}${a.unknown ? ", says it cannot see the turn" : ""}${
+		typeof a.judge === "number" ? `, judged ${a.judge}/2` : ""
+	})`;
+
+/** The whole run as Markdown: one block per item, totals at the end. */
+export function recallReport(rows: RecallTurnResult[], meta: { fold: boolean; modelCalls: number }): string[] {
+	const a = recallTotals(rows.map((r) => r.a));
+	const b = recallTotals(rows.map((r) => r.b));
+	const out = [
+		"# protokoll recall",
+		"",
+		"Does the summary still hold the facts of turns that left the context? The same questions were",
+		"asked twice: against the summary as it stands (A) and against the same summary with the state of",
+		"work removed (B). " +
+			(meta.fold
+				? "The state of work was folded with the model for this run."
+				: "The stored state of work was used as it is, without a model call."),
+		"",
+		"| turn | A (with state of work) | B (without) |",
+		"|---|---|---|",
+	];
+	for (const r of rows) out.push(`| ${r.item.turn} | ${recallAnswerLine(r.a)} | ${recallAnswerLine(r.b)} |`);
+	out.push(
+		"",
+		`A: ${a.hits} hits, ${a.partial} partial, ${a.misses} misses · mean similarity ${a.mean}`,
+		`B: ${b.hits} hits, ${b.partial} partial, ${b.misses} misses · mean similarity ${b.mean}`,
+		`model calls: ${meta.modelCalls}`,
+		`a hit starts at similarity ${RECALL_HIT}`,
+		"",
+		"Legend: expected = what the protocol of that turn recorded as result and decision; the",
+		"question only quotes the user's own words, so the protocol text is never part of it. The",
+		"requests carry no tools: what counts is what the summary alone still holds.",
+		"",
+	);
+	for (const r of rows) {
+		out.push(
+			`## Turn ${r.item.turn} — A: ${recallAnswerLine(r.a)} · B: ${recallAnswerLine(r.b)}`,
+			"",
+			`Question: ${r.item.question}`,
+			"",
+			"Expected (from the protocol):",
+			"",
+			`> ${r.item.expected.replace(/\n/g, "\n> ")}`,
+			"",
+			`Answer A: ${(r.a.text ?? "(no answer)").replace(/\n/g, " ")}`,
+			"",
+			`Answer B: ${(r.b.text ?? "(no answer)").replace(/\n/g, " ")}`,
+			"",
+		);
+	}
+	return out;
+}

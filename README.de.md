@@ -159,6 +159,7 @@ löschen, sonst lädt die Erweiterung doppelt. `protokoll.json` und alle Sitzung
 | `/protokoll show` | Vorschau der Zusammenfassung (ohne Modellaufruf) |
 | `/protokoll export [datei]` | dasselbe als Markdown-Datei, mit Diagnoseteil: wirksame Konfiguration, alle Compactings, gespeicherter Stand mit geprüften Vorgaben, Tabelle aller Züge, alle Protokolle vollständig |
 | `/protokoll stats [--file <pfad>]` | Zahlen pro Compacting: was der Kontext vor dem Schnitt hielt, was die nächste Anfrage danach trug (Systemprompt, Zusammenfassung, wörtlich behaltene Züge), Dauer der Runde, Zählung der Züge, dazu Sitzungs-Gesamtwerte und die Prompt-Cache-Werte; `--file` schreibt die ganze Tabelle als Markdown |
+| `/protokoll recall [n] [--fold] [--judge] [--seed N] [--file <pfad>]` | misst, was die Zusammenfassung noch weiß: holt n Züge, die den Kontext verlassen haben (Standard 5, höchstens 20, gleichmäßig über die Sitzung verteilt), fragt nach deren Ergebnis oder Entscheidung – einmal gegen die Zusammenfassung wie sie steht (A), einmal ohne den Stand der Arbeit (B) – und bewertet beide gegen das, was das Protokoll notiert hat. Die Anfragen tragen keine Werkzeuge, es kann also nur antworten, was die Zusammenfassung selbst hält |
 | `/protokoll pin N` / `unpin N` | Zug N beim Compacting im vollen Text behalten |
 | `/protokoll on` / `off` | für diese Sitzung ein- oder ausschalten. `off` lässt Prompt und Werkzeugliste byte-genau gleich und nimmt die Regeln mit einer Nachricht zurück (Präfix-Cache bleibt); die Protokollwerkzeuge antworten `pi-protokoll is disabled` |
 | `/protokoll off --strip` | hartes Aus: Der Abschnitt verlässt den Systemprompt und die Protokollwerkzeuge werden abgemeldet – die nächste Anfrage verarbeitet den ganzen Kontext neu (einmalig). Eine Zurücknahme ist nicht nötig |
@@ -171,6 +172,12 @@ Die Statistik unterscheidet die zwei „nach dem Compacting“-Zahlen, die oft v
 nächste Anfrage trägt (Systemprompt + Zusammenfassung + wörtlich behaltene Züge). Beides sind
 Schätzungen mit 4 Zeichen pro Token – dieselbe Schätzung, die auch Pi benutzt. Ein Compacting einer
 älteren Version zeigt `–`, weil diese Zahlen damals nicht gespeichert wurden; nichts wird geschätzt.
+
+Recall nennt die Zahl der Modellaufrufe, bevor es anfängt: `n` Punkte × 2 Kontexte. Benutzt wird der
+gespeicherte Stand der Arbeit, außer `--fold` lässt ihn neu falten; ohne `--judge` wird ohne zweites
+Modell bewertet, und die Sitzung bekommt genau einen `protokoll-recall`-Eintrag, damit spätere Läufe
+vergleichbar sind – sonst ändert sich nichts. Dieselben Argumente wählen dieselben Züge (`--seed`
+dreht die Liste vorher). 
 
 Die deutschen Befehlsnamen früherer Versionen (`zeigen`, `anheften`, `lösen`, `an`, `aus`,
 `neu-laden`, `stand-neu`, `heilen`) funktionieren weiter.
