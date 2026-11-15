@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.9.11 – 2026-11-15
 
 - **Answers from a question tool count as user input** (#3, thanks @Tutanchamon). A package that asks the user questions in a web UI (pi-web's `ask_user`) stores the answers as a `custom_message`; they were neither a turn start nor part of any user text, so the next compaction dropped them and every later summary kept saying the answers were pending. They now start the turn that works with them, are kept verbatim with `keepUserMessages`, and `protocol_turn` returns them.
 - A state of work written in the old version-2 numbering is renumbered with the counting rule of that time, so the answers do not shift its turn references.
