@@ -665,6 +665,32 @@ export interface CompactEntryData extends CompactCounts {
 }
 
 /**
+ * What the context looked like right after a compaction. The numbers exist only here: a session
+ * written by an older version has none of them, and `/protokoll stats` shows "–" for those instead
+ * of guessing. Custom entry, so nothing in here is ever sent to the model.
+ */
+export const COMPACT_AFTER_ENTRY = "protokoll-compact-after";
+
+export interface CompactAfterData {
+	version: 1;
+	/** the compaction entry these numbers describe */
+	compactionEntryId: string;
+	/** true: this extension wrote the summary, false: Pi's own compaction */
+	fromExtension: boolean;
+	/** tokens in the context when the cut was triggered, as Pi counted them */
+	tokensBefore?: number;
+	/** everything the model sees after the cut: system prompt + summary + kept turns */
+	totalAfter: number;
+	/** the system prompt part of totalAfter */
+	systemPrompt: number;
+	/** only the text the compaction wrote */
+	summary: number;
+	/** turns still in the context word for word */
+	keptVerbatim: number;
+	contextWindow?: number;
+}
+
+/**
  * Live line of a running pass on the shared extension bus (`pi.events`). Nothing is stored in the
  * session here: the durable record stays the single COMPACT_ENTRY above. pi-webapp shows these
  * lines in the browser, the console shows them as its widget.
@@ -2377,4 +2403,258 @@ export function diagnosticAppendix(branch: PlainEntry[], config: ProtocolConfig,
 		add("note", f.other);
 	}
 	return out.join("\n");
+}
+
+// ---------------------------------------------------------------- /protokoll stats
+
+/** A number that was never stored stays a dash: nothing here is guessed. */
+function dash(value: number | undefined): string {
+	if (typeof value !== "number" || !Number.isFinite(value)) return "–";
+	// same grouping the notifications use, so big token counts stay readable
+	return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function statsTime(ts: string | undefined): string {
+	if (!ts) return "–";
+	const d = new Date(ts);
+	return Number.isNaN(d.getTime())
+		? "–"
+		: d.toLocaleString(undefined, { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Median of a list; the mean of the two middle values when the count is even. */
+export function medianOf(values: number[]): number | undefined {
+	if (!values.length) return undefined;
+	const s = [...values].sort((a, b) => a - b);
+	const mid = Math.floor(s.length / 2);
+	return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+export interface UsageStats {
+	/** answers that carry provider usage data at all */
+	requests: number;
+	/** of those, how many reported a cache read above zero */
+	cached: number;
+	cacheReadMedian?: number;
+	cacheReadMax?: number;
+}
+
+/**
+ * Prompt cache facts from the usage data the provider writes onto each answer
+ * (`usage.input`, `usage.cacheRead`, …). Sessions without those fields report zero requests.
+ */
+export function collectUsageStats(branch: PlainEntry[]): UsageStats {
+	const reads: number[] = [];
+	let cached = 0;
+	for (const e of branch) {
+		if (e.type !== "message" || e.message?.role !== "assistant") continue;
+		const u = (e.message as { usage?: Record<string, unknown> }).usage;
+		if (!u || typeof u !== "object" || typeof u.input !== "number") continue;
+		const read = typeof u.cacheRead === "number" ? u.cacheRead : 0;
+		reads.push(read);
+		if (read > 0) cached++;
+	}
+	if (!reads.length) return { requests: 0, cached: 0 };
+	const med = medianOf(reads);
+	return {
+		requests: reads.length,
+		cached,
+		...(med === undefined ? {} : { cacheReadMedian: med }),
+		cacheReadMax: Math.max(...reads),
+	};
+}
+
+export interface CompactionStatsRow {
+	/** 1-based over the compaction entries of this branch, oldest first */
+	number: number;
+	timestamp?: string;
+	by: "protokoll" | "Pi";
+	/** how the pass of this extension ended, when it wrote one */
+	outcome?: CompactEntryData["outcome"];
+	tokensBefore?: number;
+	/** stored measurements after the cut; absent for compactions from older versions */
+	after?: CompactAfterData;
+	durationMs?: number;
+	condensedTurns?: number;
+	detailTurns?: number;
+	keptTurns?: number;
+	missingTurns?: number;
+}
+
+export interface StatsNumbers {
+	before?: number;
+	afterTotal?: number;
+	summary?: number;
+	durationMs?: number;
+}
+
+export interface StatsTotals {
+	turns: number;
+	turnsWithProtocol: number;
+	protokoll: number;
+	pi: number;
+	noRoom: number;
+	failed: number;
+	medians: StatsNumbers;
+	maxima: StatsNumbers;
+	usage: UsageStats;
+}
+
+export interface SessionStats {
+	rows: CompactionStatsRow[];
+	totals: StatsTotals;
+}
+
+/**
+ * Everything `/protokoll stats` shows, built from the branch alone: the compaction entries joined
+ * with the pass entry written before them (`COMPACT_ENTRY`) and the after entry stored for them
+ * (`COMPACT_AFTER_ENTRY`). Entries may lack any optional field, older sessions do.
+ */
+export function sessionStats(branch: PlainEntry[]): SessionStats {
+	const turns = collectTurns(branch);
+	const protocols = collectProtocols(branch);
+	const afterById = new Map<string, CompactAfterData>();
+	for (const e of branch) {
+		if (e.type !== "custom" || e.customType !== COMPACT_AFTER_ENTRY) continue;
+		const d = e.data as CompactAfterData | undefined;
+		if (d && typeof d.compactionEntryId === "string" && d.compactionEntryId) afterById.set(d.compactionEntryId, d);
+	}
+
+	const rows: CompactionStatsRow[] = [];
+	/** the pass of this extension, matched to the compaction entry that follows it */
+	let pass: CompactEntryData | undefined;
+	for (const e of branch) {
+		if (e.type === "custom" && e.customType === COMPACT_ENTRY) {
+			pass = e.data && typeof e.data === "object" ? (e.data as CompactEntryData) : undefined;
+			continue;
+		}
+		if (e.type !== "compaction") continue;
+		const row: CompactionStatsRow = { number: rows.length + 1, by: isOwnCompaction(e) ? "protokoll" : "Pi" };
+		if (e.timestamp) row.timestamp = e.timestamp;
+		if (pass?.outcome) row.outcome = pass.outcome;
+		const before = typeof e.tokensBefore === "number" ? e.tokensBefore : pass?.tokensBefore;
+		if (typeof before === "number") row.tokensBefore = before;
+		const stored = afterById.get(e.id);
+		if (stored) row.after = stored;
+		for (const key of ["durationMs", "condensedTurns", "detailTurns", "keptTurns", "missingTurns"] as const) {
+			const v = pass?.[key];
+			if (typeof v === "number") row[key] = v;
+		}
+		rows.push(row);
+		pass = undefined;
+	}
+
+	const listOf = (pick: (r: CompactionStatsRow) => number | undefined): number[] =>
+		rows.map(pick).filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+	const beforeValues = listOf((r) => r.tokensBefore);
+	const afterValues = listOf((r) => r.after?.totalAfter);
+	const summaryValues = listOf((r) => r.after?.summary);
+	const durationValues = listOf((r) => r.durationMs);
+	const mBefore = medianOf(beforeValues);
+	const mAfter = medianOf(afterValues);
+	const mSummary = medianOf(summaryValues);
+	const mDuration = medianOf(durationValues);
+	const medians: StatsNumbers = {
+		...(mBefore === undefined ? {} : { before: mBefore }),
+		...(mAfter === undefined ? {} : { afterTotal: mAfter }),
+		...(mSummary === undefined ? {} : { summary: mSummary }),
+		...(mDuration === undefined ? {} : { durationMs: mDuration }),
+	};
+	const maxima: StatsNumbers = {
+		...(beforeValues.length ? { before: Math.max(...beforeValues) } : {}),
+		...(afterValues.length ? { afterTotal: Math.max(...afterValues) } : {}),
+		...(summaryValues.length ? { summary: Math.max(...summaryValues) } : {}),
+		...(durationValues.length ? { durationMs: Math.max(...durationValues) } : {}),
+	};
+
+	const totals: StatsTotals = {
+		turns: turns.length,
+		turnsWithProtocol: turns.filter((t) => protocols.get(t.userEntryId)?.fields).length,
+		protokoll: rows.filter((r) => r.by === "protokoll").length,
+		pi: rows.filter((r) => r.by === "Pi").length,
+		noRoom: rows.filter((r) => r.outcome === "no_room").length,
+		failed: rows.filter((r) => r.outcome === "failed").length,
+		medians,
+		maxima,
+		usage: collectUsageStats(branch),
+	};
+	return { rows, totals };
+}
+
+/** One line per column, so a quoted number always travels with its meaning. */
+export const STATS_LEGEND: string[] = [
+	"# = compaction on this branch, oldest first",
+	"when = time of the compaction entry",
+	"by = protokoll: this extension wrote the summary; Pi: Pi compacted on its own",
+	"before = tokens in the context when the cut was triggered (counted by Pi)",
+	"after total = everything the model sees after the cut: system prompt + summary + kept turns (estimate, 4 characters per token)",
+	"system = the system prompt inside after total (estimate)",
+	"summary = only the text written by the compaction (estimate)",
+	"kept = turns still in the context word for word (estimate)",
+	"took = wall time of the pass in milliseconds, from the trigger to the summary being in place",
+	"turns = condensed / written as detail blocks / kept word for word",
+	"missing = turns that left the context without a protocol",
+	"– = not stored: this compaction came from an older version, nothing is guessed",
+];
+
+/** The per-compaction table as Markdown rows. */
+export function statsTable(stats: SessionStats): string[] {
+	const out = [
+		"| # | when | by | before | after total | system | summary | kept | took | turns | missing |",
+		"|---|---|---|---|---|---|---|---|---|---|---|",
+	];
+	for (const r of stats.rows) {
+		const a = r.after;
+		const turns = [r.condensedTurns, r.detailTurns, r.keptTurns]
+			.map((v) => (typeof v === "number" ? String(v) : "–"))
+			.join(" / ");
+		out.push(
+			`| ${r.number} | ${statsTime(r.timestamp)} | ${r.by} | ${dash(r.tokensBefore)} | ${dash(a?.totalAfter)} | ` +
+				`${dash(a?.systemPrompt)} | ${dash(a?.summary)} | ${dash(a?.keptVerbatim)} | ` +
+				`${typeof r.durationMs === "number" ? compactDuration(r.durationMs) : "–"} | ${turns} | ` +
+				`${typeof r.missingTurns === "number" ? String(r.missingTurns) : "–"} |`,
+		);
+	}
+	if (!stats.rows.length) out.push("| – | no compaction yet | | | | | | | | | |");
+	return out;
+}
+
+/** Session totals and the prompt-cache lines. */
+export function statsTotalsLines(stats: SessionStats): string[] {
+	const t = stats.totals;
+	const rate = t.turns ? Math.round((t.turnsWithProtocol / t.turns) * 100) : 0;
+	const pair = (label: string, med?: number, max?: number) => `${label}: median ${dash(med)}, max ${dash(max)}`;
+	const time = (label: string, med?: number, max?: number) =>
+		`${label}: median ${typeof med === "number" ? compactDuration(med) : "–"}, max ${typeof max === "number" ? compactDuration(max) : "–"}`;
+	return [
+		`turns: ${t.turns}, with protocol ${t.turnsWithProtocol} (${rate} %)`,
+		`compactions: ${stats.rows.length} (protokoll ${t.protokoll}, Pi ${t.pi}; no room ${t.noRoom}, failed ${t.failed})`,
+		pair("before", t.medians.before, t.maxima.before),
+		pair("after total", t.medians.afterTotal, t.maxima.afterTotal),
+		pair("summary", t.medians.summary, t.maxima.summary),
+		time("took", t.medians.durationMs, t.maxima.durationMs),
+		...usageLines(t.usage),
+	];
+}
+
+export function usageLines(u: UsageStats): string[] {
+	if (!u.requests) return ["prompt cache: no usage data in this session"];
+	return [
+		`prompt cache: ${dash(u.requests)} requests with usage data, ${dash(u.cached)} of them with a cache read above zero`,
+		`cache read: median ${dash(u.cacheReadMedian)}, max ${dash(u.cacheReadMax)}`,
+	];
+}
+
+/** One line for the notification; the table and the legend carry the detail. */
+export function statsSummary(stats: SessionStats): string {
+	const t = stats.totals;
+	const parts = [
+		`${t.turns} turns, ${t.turnsWithProtocol} with protocol`,
+		`${stats.rows.length} compactions (protokoll ${t.protokoll}, Pi ${t.pi})`,
+	];
+	if (typeof t.medians.before === "number") parts.push(`median before ${dash(t.medians.before)}`);
+	if (typeof t.medians.afterTotal === "number") parts.push(`after ${dash(t.medians.afterTotal)}`);
+	if (typeof t.medians.summary === "number") parts.push(`summary ${dash(t.medians.summary)}`);
+	parts.push(t.usage.requests ? `cache ${t.usage.cached}/${t.usage.requests}` : "no usage data");
+	return parts.join(" · ");
 }

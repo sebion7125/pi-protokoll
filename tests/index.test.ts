@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+	COMPACT_AFTER_ENTRY,
 	COMPACT_ENTRY,
+	type CompactAfterData,
 	type CompactEntryData,
 	collectProtocols,
 	collectTurns,
@@ -1080,6 +1082,97 @@ describe("protokoll extension", () => {
 		expect(note).toContain("context after compaction");
 		expect(note).toContain("before 213,621");
 		expect(note).toContain("summary ≈ 875");
+	});
+
+	it("stores the numbers measured after a compaction", async () => {
+		await h.turn("q1", "a1\n<protocol>result: r1</protocol>");
+		const summary = "x".repeat(3500);
+		h.branch.push({
+			id: "k9",
+			type: "compaction",
+			summary,
+			firstKeptEntryId: "none",
+			details: { protokoll: true },
+		} as PlainEntry);
+		await h.fire("session_compact", {
+			compactionEntry: { id: "k9", summary, tokensBefore: 213621 },
+			fromExtension: true,
+		});
+		const stored = [...h.branch].reverse().find((e) => e.customType === COMPACT_AFTER_ENTRY)
+			?.data as CompactAfterData;
+		expect(stored.compactionEntryId).toBe("k9");
+		expect(stored.fromExtension).toBe(true);
+		expect(stored.tokensBefore).toBe(213621);
+		expect(stored.summary).toBe(875);
+		expect(stored.totalAfter).toBeGreaterThanOrEqual(stored.summary + stored.systemPrompt);
+		expect(stored.keptVerbatim).toBe(Math.max(0, stored.totalAfter - stored.systemPrompt - stored.summary));
+	});
+
+	it("shows the stats table with its legend and writes the file", async () => {
+		await h.turn("q1", "a1\n<protocol>result: r1</protocol>");
+		h.branch.push({
+			id: "p1",
+			type: "custom",
+			customType: COMPACT_ENTRY,
+			data: {
+				version: 1,
+				outcome: "protocol",
+				startedAt: "2026-11-15T10:00:00.000Z",
+				durationMs: 45000,
+				steps: [],
+				notes: [],
+				condensedTurns: 4,
+				detailTurns: 2,
+				keptTurns: 3,
+				missingTurns: 0,
+			},
+		} as PlainEntry);
+		h.branch.push({
+			id: "a1",
+			type: "custom",
+			customType: COMPACT_AFTER_ENTRY,
+			data: {
+				version: 1,
+				compactionEntryId: "k3",
+				fromExtension: true,
+				tokensBefore: 213621,
+				totalAfter: 67352,
+				systemPrompt: 4073,
+				summary: 37421,
+				keptVerbatim: 25858,
+			},
+		} as PlainEntry);
+		h.branch.push({
+			id: "k3",
+			type: "compaction",
+			summary: "s",
+			firstKeptEntryId: "none",
+			tokensBefore: 213621,
+			details: { protokoll: true },
+		} as PlainEntry);
+
+		await h.commands.get("protokoll").handler("stats", h.ctx);
+		const note = h.notes.at(-1) ?? "";
+		expect(note).toContain("protokoll stats:");
+		expect(note).toContain("| 1 |");
+		expect(note).toContain("67,352");
+		expect(note).toContain("after total = everything the model sees after the cut");
+		expect(note).toContain("no usage data in this session");
+
+		const file = join(h.ctx.cwd, "stats.md");
+		await h.commands.get("protokoll").handler(`stats --file ${file}`, h.ctx);
+		const md = readFileSync(file, "utf8");
+		expect(md).toContain(
+			"| # | when | by | before | after total | system | summary | kept | took | turns | missing |",
+		);
+		expect(md).toContain("summary = only the text written by the compaction");
+		expect(h.notes.at(-1)).toContain(`stats written: ${file}`);
+	});
+
+	it("offers stats in the argument completions", () => {
+		expect(h.commands.get("protokoll").getArgumentCompletions("stat")).toEqual(
+			expect.arrayContaining([{ value: "stats", label: "stats" }]),
+		);
 	});
 
 	it("counts compactions in the status", async () => {

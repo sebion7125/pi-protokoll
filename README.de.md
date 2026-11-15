@@ -158,12 +158,19 @@ löschen, sonst lädt die Erweiterung doppelt. `protokoll.json` und alle Sitzung
 | `/protokoll` oder `/protokoll status` | Zustand, Züge, Protokolle, angeheftete Züge, Abdeckung des Stands, Zahl der Compactings |
 | `/protokoll show` | Vorschau der Zusammenfassung (ohne Modellaufruf) |
 | `/protokoll export [datei]` | dasselbe als Markdown-Datei, mit Diagnoseteil: wirksame Konfiguration, alle Compactings, gespeicherter Stand mit geprüften Vorgaben, Tabelle aller Züge, alle Protokolle vollständig |
+| `/protokoll stats [--file <pfad>]` | Zahlen pro Compacting: was der Kontext vor dem Schnitt hielt, was die nächste Anfrage danach trug (Systemprompt, Zusammenfassung, wörtlich behaltene Züge), Dauer der Runde, Zählung der Züge, dazu Sitzungs-Gesamtwerte und die Prompt-Cache-Werte; `--file` schreibt die ganze Tabelle als Markdown |
 | `/protokoll pin N` / `unpin N` | Zug N beim Compacting im vollen Text behalten |
 | `/protokoll on` / `off` | für diese Sitzung ein- oder ausschalten. `off` lässt Prompt und Werkzeugliste byte-genau gleich und nimmt die Regeln mit einer Nachricht zurück (Präfix-Cache bleibt); die Protokollwerkzeuge antworten `pi-protokoll is disabled` |
 | `/protokoll off --strip` | hartes Aus: Der Abschnitt verlässt den Systemprompt und die Protokollwerkzeuge werden abgemeldet – die nächste Anfrage verarbeitet den ganzen Kontext neu (einmalig). Eine Zurücknahme ist nicht nötig |
 | `/protokoll reload` | `protokoll.json` neu einlesen |
 | `/protokoll rebuild` | beim nächsten Compacting den Stand aus allen Protokollen neu aufbauen statt fortschreiben |
 | `/protokoll repair` | ältere Sitzung auf den aktuellen Stand bringen: fehlende Protokolle aus dem Transkript, fehlende `index`/`tags` nachtragen (8 Züge pro Anfrage), danach Compacting mit Neuaufbau. Ersetzt nie, was das Modell selbst geschrieben hat; ein erneuter Aufruf setzt fort |
+
+Die Statistik unterscheidet die zwei „nach dem Compacting“-Zahlen, die oft verwechselt werden:
+`summary` ist nur der Text, den das Compacting geschrieben hat, `after total` ist alles, was die
+nächste Anfrage trägt (Systemprompt + Zusammenfassung + wörtlich behaltene Züge). Beides sind
+Schätzungen mit 4 Zeichen pro Token – dieselbe Schätzung, die auch Pi benutzt. Ein Compacting einer
+älteren Version zeigt `–`, weil diese Zahlen damals nicht gespeichert wurden; nichts wird geschätzt.
 
 Die deutschen Befehlsnamen früherer Versionen (`zeigen`, `anheften`, `lösen`, `an`, `aus`,
 `neu-laden`, `stand-neu`, `heilen`) funktionieren weiter.

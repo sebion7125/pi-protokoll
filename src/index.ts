@@ -30,7 +30,9 @@ import {
 	activeRules,
 	backfillPrompt,
 	buildIndex,
+	COMPACT_AFTER_ENTRY,
 	COMPACT_ENTRY,
+	type CompactAfterData,
 	type CompactCounts,
 	type CompactEntryData,
 	type CompactionPlan,
@@ -95,6 +97,7 @@ import {
 	renderStatus,
 	renderSummary,
 	STATE_ENTRY,
+	STATS_LEGEND,
 	type StateEntryData,
 	SUPPLEMENT_ENTRY,
 	type SupplementEntryData,
@@ -103,8 +106,12 @@ import {
 	sectionKnownToBranch,
 	serializeTurn,
 	sessionState,
+	sessionStats,
 	shortenPrompt,
 	staleSwitchEntries,
+	statsSummary,
+	statsTable,
+	statsTotalsLines,
 	supplementPrompt,
 	switchNoteSeen,
 	systemPromptSection,
@@ -1447,6 +1454,20 @@ export default function protokoll(pi: ExtensionAPI) {
 			const kept = Math.max(0, total - system - summary);
 			const before = event.compactionEntry.tokensBefore;
 			const window = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+			// the same numbers, stored: /protokoll stats quotes them later instead of showing them once
+			const compactionId = (event.compactionEntry as { id?: string } | undefined)?.id ?? "";
+			if (compactionId)
+				pi.appendEntry<CompactAfterData>(COMPACT_AFTER_ENTRY, {
+					version: 1,
+					compactionEntryId: compactionId,
+					fromExtension: event.fromExtension === true,
+					...(typeof before === "number" ? { tokensBefore: before } : {}),
+					totalAfter: total,
+					systemPrompt: system,
+					summary,
+					keptVerbatim: kept,
+					...(window ? { contextWindow: window } : {}),
+				});
 			const line =
 				`context after compaction ≈ ${fmt(total)} tokens` +
 				(before ? ` (before ${fmt(before)}, −${Math.round((1 - total / before) * 100)} %)` : "") +
@@ -1616,9 +1637,20 @@ export default function protokoll(pi: ExtensionAPI) {
 		return new Text(theme.fg("dim", lines.join("\n")), 1, 0);
 	});
 
+	pi.registerEntryRenderer<CompactAfterData>(COMPACT_AFTER_ENTRY, (entry, { expanded }, theme) => {
+		const d = entry.data;
+		if (!d) return undefined;
+		const head =
+			`▸ protokoll after cut ≈ ${fmt(d.totalAfter)} tokens (system ${fmt(d.systemPrompt)}, ` +
+			`summary ${fmt(d.summary)}, kept ${fmt(d.keptVerbatim)})` +
+			(typeof d.tokensBefore === "number" ? `, before ${fmt(d.tokensBefore)}` : "") +
+			(d.fromExtension ? "" : " · Pi's own compaction");
+		return new Text(theme.fg("dim", expanded ? `${head}\n  estimate: 4 characters per token` : head), 1, 0);
+	});
+
 	// ------------------------------------------------------------------ command
 
-	const SUB = ["status", "show", "export", "pin", "unpin", "on", "off", "reload", "rebuild", "repair"];
+	const SUB = ["status", "show", "export", "stats", "pin", "unpin", "on", "off", "reload", "rebuild", "repair"];
 	/** German names of the first versions, still accepted. */
 	const ALIASES: Record<string, string> = {
 		zeigen: "show",
@@ -1634,7 +1666,7 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	pi.registerCommand("protokoll", {
 		description:
-			"Session protocol: status | show | export [file] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
+			"Session protocol: status | show | export [file] | stats [--file <path>] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
 		getArgumentCompletions: (prefix) =>
 			SUB.filter((s) => s.startsWith(prefix.trim())).map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
@@ -1849,6 +1881,43 @@ export default function protokoll(pi: ExtensionAPI) {
 								"info",
 							),
 					});
+					return;
+				}
+				case "stats": {
+					const stats = sessionStats(branch);
+					const at = rest.findIndex((a) => a === "--file" || a === "-file" || a === "file");
+					const name = at >= 0 ? rest.slice(at + 1).join(" ") : "";
+					const report = (rows: typeof stats.rows) =>
+						[
+							...statsTable({ rows, totals: stats.totals }),
+							"",
+							...statsTotalsLines(stats),
+							"",
+							"Legend:",
+							...STATS_LEGEND.map((l) => `  ${l}`),
+						].join("\n");
+					if (name) {
+						const file = isAbsolute(name) ? name : join(ctx.cwd, name);
+						if (existsSync(file)) {
+							const ok = ctx.hasUI && (await ctx.ui.confirm("Overwrite file?", file));
+							if (!ok) {
+								ctx.ui.notify(`protokoll: not written, ${file} already exists`, "warning");
+								return;
+							}
+						}
+						writeFileSync(file, `# protokoll stats\n\n${report(stats.rows)}\n`, "utf8");
+						ctx.ui.notify(`protokoll: stats written: ${file}`, "info");
+						return;
+					}
+					// the newest compactions fit into a notification; the full table needs --file
+					const shown = stats.rows.slice(-8);
+					const hidden = stats.rows.length - shown.length;
+					ctx.ui.notify(
+						`protokoll stats: ${statsSummary(stats)}` +
+							(hidden ? `\n  ${hidden} earlier compaction${hidden === 1 ? "" : "s"} not shown` : "") +
+							`\n\n${report(shown)}\n\n/protokoll stats --file <path> writes the whole table.`,
+						"info",
+					);
 					return;
 				}
 				case "reload": {

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`/protokoll stats [--file <path>]` – one row per compaction, each number with its meaning.** Two different "after compaction" numbers were being quoted for one and the same session (about 35k and about 67k tokens) because nothing said which part of the context they measure: the 35k is only the summary the compaction wrote, the 67k is everything the next request carries. The numbers the `session_compact` handler already computed for its notification are now stored as a `protokoll-compact-after` entry (total, system prompt, summary, kept turns, window, and which extension wrote the summary), and `stats` joins the compaction entries with that entry and with the pass entry before them: before, after total, system, summary, kept, duration, the condensed / detail / kept turn counts and the turns that left without a protocol. Session totals add turns and protocol rate, compactions by protokoll / Pi / no room / failed, medians and maxima of before, after total, summary and duration, and the prompt cache read from the provider's own usage data (`usage.cacheRead` on each answer – a session without those fields says so instead of printing zeros). A legend states every column, and anything a version did not store shows as `–`. `--file <path>` writes the whole table as Markdown; the notification shows the newest eight cuts.
+
 ## 0.9.11 – 2026-11-15
 
 - **Answers from a question tool count as user input** (#3, thanks @Tutanchamon). A package that asks the user questions in a web UI (pi-web's `ask_user`) stores the answers as a `custom_message`; they were neither a turn start nor part of any user text, so the next compaction dropped them and every later summary kept saying the answers were pending. They now start the turn that works with them, are kept verbatim with `keepUserMessages`, and `protocol_turn` returns them.

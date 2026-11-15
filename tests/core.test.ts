@@ -6,13 +6,16 @@ import {
 	activeRules,
 	backfillPrompt,
 	buildIndex,
+	COMPACT_AFTER_ENTRY,
 	COMPACT_ENTRY,
+	type CompactAfterData,
 	type CompactEntryData,
 	chooseCut,
 	cleanFileEntry,
 	clipMiddle,
 	collectProtocols,
 	collectTurns,
+	collectUsageStats,
 	compactDuration,
 	compactStatusLine,
 	currentOpenItems,
@@ -39,9 +42,11 @@ import {
 	isUserInput,
 	LONG_CHAT_NOTE,
 	loadConfig,
+	medianOf,
 	mergeConfig,
 	narrativeBudget,
 	type PlainEntry,
+	type PlainMessage,
 	PROGRESS_PROMPT,
 	type ProtocolConfig,
 	type ProtocolEntryData,
@@ -57,6 +62,7 @@ import {
 	renumberLegacyState,
 	reviewIsSubset,
 	STATE_ENTRY,
+	STATS_LEGEND,
 	SUPPLEMENT_ENTRY,
 	SWITCH_MESSAGE,
 	searchTurns,
@@ -64,8 +70,11 @@ import {
 	serializeTurn,
 	sessionEnabled,
 	sessionState,
+	sessionStats,
 	splitList,
 	staleSwitchEntries,
+	statsTable,
+	statsTotalsLines,
 	supplementPrompt,
 	switchEntries,
 	switchNoteSeen,
@@ -75,6 +84,7 @@ import {
 	touchedFiles,
 	turnHasWork,
 	turnUserText,
+	usageLines,
 } from "../src/core.ts";
 
 let seq = 0;
@@ -1227,5 +1237,147 @@ describe("the model of the extension's own requests", () => {
 		expect(isUnsupportedModelCall({ provider: "other", api: "cursor-sdk" })).toBe(true);
 		expect(isUnsupportedModelCall({ provider: "openai", api: "openai-completions" })).toBe(false);
 		expect(isUnsupportedModelCall({})).toBe(false);
+	});
+});
+
+describe("stats: numbers per compaction", () => {
+	const pass = (over: Partial<CompactEntryData> = {}): CompactEntryData =>
+		({
+			version: 1,
+			outcome: "protocol",
+			startedAt: "2026-11-15T10:00:00.000Z",
+			durationMs: 45_000,
+			steps: [],
+			notes: [],
+			tokensBefore: 200_000,
+			condensedTurns: 12,
+			detailTurns: 5,
+			keptTurns: 3,
+			missingTurns: 1,
+			...over,
+		}) as CompactEntryData;
+
+	const afterEntry = (compactionId: string, over: Partial<CompactAfterData> = {}): PlainEntry => ({
+		id: `after-${compactionId}`,
+		type: "custom",
+		customType: COMPACT_AFTER_ENTRY,
+		data: {
+			version: 1,
+			compactionEntryId: compactionId,
+			fromExtension: true,
+			tokensBefore: 200_000,
+			totalAfter: 67_000,
+			systemPrompt: 4_000,
+			summary: 35_000,
+			keptVerbatim: 28_000,
+			contextWindow: 200_000,
+			...over,
+		},
+	});
+
+	const mixedBranch = (): PlainEntry[] => [
+		user("one"),
+		assistant("a1"),
+		{ id: "p1", type: "custom", customType: COMPACT_ENTRY, data: pass() },
+		{
+			id: "k1",
+			type: "compaction",
+			summary: "S1",
+			firstKeptEntryId: "e2",
+			tokensBefore: 213_451,
+			timestamp: "2026-11-15T10:01:00.000Z",
+			details: { protokoll: true },
+		},
+		afterEntry("k1", { totalAfter: 70_000, summary: 40_000 }),
+		user("two"),
+		// Pi compacted on its own: no pass entry and no numbers of ours
+		{ id: "k2", type: "compaction", summary: "S2", firstKeptEntryId: "e5", tokensBefore: 120_000, details: {} },
+		// a pass written by an older version: the newer fields are missing
+		{
+			id: "p3",
+			type: "custom",
+			customType: COMPACT_ENTRY,
+			data: { version: 1, outcome: "no_room", startedAt: "2026-11-15T11:00:00.000Z" } as unknown as CompactEntryData,
+		},
+		{
+			id: "k3",
+			type: "compaction",
+			summary: "S3",
+			firstKeptEntryId: "e5",
+			tokensBefore: 150_000,
+			details: { protokoll: true },
+		},
+		afterEntry("k3"),
+	];
+
+	it("joins the pass, the compaction entry and the stored after-numbers", () => {
+		const stats = sessionStats(mixedBranch());
+		expect(stats.rows.map((r) => [r.number, r.by, r.outcome])).toEqual([
+			[1, "protokoll", "protocol"],
+			[2, "Pi", undefined],
+			[3, "protokoll", "no_room"],
+		]);
+		expect(stats.rows[0].after?.totalAfter).toBe(70_000);
+		expect(stats.rows[1].after).toBeUndefined();
+		expect(stats.rows[1].tokensBefore).toBe(120_000);
+		// the old pass entry has no duration and no turn counts: nothing is guessed
+		expect(stats.rows[2].durationMs).toBeUndefined();
+		expect(stats.rows[2].condensedTurns).toBeUndefined();
+		expect(stats.rows[2].after?.summary).toBe(35_000);
+		expect(stats.totals).toMatchObject({ protokoll: 2, pi: 1, noRoom: 1, failed: 0 });
+	});
+
+	it("prints a dash for every number that was never stored", () => {
+		const table = statsTable(sessionStats(mixedBranch()));
+		expect(table).toHaveLength(5);
+		expect(table[2]).toContain("| 1 |");
+		expect(table[3]).toContain("| 2 | – | Pi | 120,000 | – | – | – | – | – | – / – / – | – |");
+		expect(table[4]).toContain("| 3 |");
+		expect(table[4]).toContain("| 150,000 | 67,000 | 4,000 | 35,000 | 28,000 |");
+	});
+
+	it("takes the middle value for an odd count and the mean of two for an even count", () => {
+		expect(medianOf([5, 1, 3])).toBe(3);
+		expect(medianOf([5, 1, 3, 11])).toBe(4);
+		expect(medianOf([])).toBeUndefined();
+		const totals = sessionStats(mixedBranch()).totals;
+		expect(totals.medians.before).toBe(150_000);
+		expect(totals.maxima.before).toBe(213_451);
+		expect(totals.medians.afterTotal).toBe(68_500);
+		expect(totals.maxima.summary).toBe(40_000);
+		expect(totals.medians.durationMs).toBe(45_000);
+	});
+
+	it("reports the totals and always names the cache situation", () => {
+		const lines = statsTotalsLines(sessionStats(mixedBranch()));
+		expect(lines.some((l) => l.startsWith("compactions: 3 (protokoll 2, Pi 1; no room 1, failed 0)"))).toBe(true);
+		expect(lines.some((l) => l.includes("before: median 150,000, max 213,451"))).toBe(true);
+		// the branch has no usage data at all
+		expect(lines.at(-1)).toBe("prompt cache: no usage data in this session");
+		expect(STATS_LEGEND.some((l) => l.startsWith("after total = everything the model sees"))).toBe(true);
+	});
+
+	it("reads the prompt cache from the provider usage data when it is there", () => {
+		const withUsage = (input: number, cacheRead: number): PlainEntry => ({
+			id: id(),
+			type: "message",
+			message: {
+				role: "assistant",
+				content: "answer",
+				usage: { input, output: 10, cacheRead, cacheWrite: 0 },
+			} as unknown as PlainMessage,
+		});
+		const branch = [user("q"), withUsage(1000, 0), withUsage(1000, 9000), withUsage(1000, 21000)];
+		expect(collectUsageStats(branch)).toMatchObject({
+			requests: 3,
+			cached: 2,
+			cacheReadMedian: 9000,
+			cacheReadMax: 21000,
+		});
+		expect(usageLines(collectUsageStats(branch))[0]).toBe(
+			"prompt cache: 3 requests with usage data, 2 of them with a cache read above zero",
+		);
+		// a session written without usage fields reports that instead of zeros
+		expect(collectUsageStats([user("q"), assistant("a")])).toEqual({ requests: 0, cached: 0 });
 	});
 });

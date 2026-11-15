@@ -156,12 +156,19 @@ otherwise the extension loads twice. Your `protokoll.json` and all session data 
 | `/protokoll` or `/protokoll status` | state, turns, protocols, pinned turns, coverage of the state of work, compaction count |
 | `/protokoll show` | preview of the summary (no model call; turns not yet folded appear as single lines) |
 | `/protokoll export [file]` | the same as a Markdown file, plus a diagnostics part: effective configuration, all compactions, the stored state with reviewed rules, a table of all turns and all protocols in full |
+| `/protokoll stats [--file <path>]` | numbers per compaction: what the context held before the cut, what the next request carried afterwards (system prompt, summary, turns kept word for word), how long the pass took, the turn counts, plus session totals and the prompt-cache reads; `--file` writes the whole table as Markdown |
 | `/protokoll pin N` / `unpin N` | keep turn N verbatim at compaction |
 | `/protokoll on` / `off` | enable or disable for this session. `off` keeps prompt and tool list byte-identical and withdraws the rules with one message (prefix cache stays); the protocol tools answer `pi-protokoll is disabled` |
 | `/protokoll off --strip` | hard off: the section leaves the system prompt and the protocol tools are unregistered, so the next request reads the whole context again (once). Needs no withdrawal message |
 | `/protokoll reload` | reread `protokoll.json` |
 | `/protokoll rebuild` | rebuild the state of work from all protocols at the next compaction instead of updating it (against drift; takes longer) |
 | `/protokoll repair` | bring an older session up to date: turns without protocol get one from their transcript, protocols without `index`/`tags` get both (8 turns per request), then compacts with a rebuild. Never replaces what the model wrote itself; running it again continues where it stopped |
+
+The stats table separates the two "after compaction" numbers that are often mixed up: `summary` is
+only the text the compaction wrote, `after total` is everything the next request carries (system
+prompt + summary + turns kept word for word). Both are estimates at 4 characters per token, the same
+estimate Pi uses. A compaction from an older version shows `–`, because those numbers were not
+stored then; nothing is guessed.
 
 The German command names of earlier versions (`zeigen`, `anheften`, `lösen`, `an`, `aus`,
 `neu-laden`, `stand-neu`, `heilen`) still work.
