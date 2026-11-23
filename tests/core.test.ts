@@ -62,14 +62,16 @@ import {
 	type RecallTurnResult,
 	recallCandidates,
 	recallExpected,
-	recallJudgeScore,
+	recallJudgePrompt,
+	recallJudgeVerdict,
 	recallPick,
+	recallPreVerdict,
 	recallQuestion,
 	recallReport,
-	recallSaysUnknown,
-	recallScore,
 	recallTotals,
+	recallTotalsLine,
 	recallVerbatim,
+	recallWantsLookup,
 	renderDetailBlock,
 	renderStatus,
 	renderSummary,
@@ -1472,44 +1474,70 @@ describe("recall: what the summary still holds of old turns", () => {
 		expect(recallExpected(undefined)).toBe("");
 	});
 
-	it("scores the same facts as a hit, other text as a miss and not-knowing as zero", () => {
-		const expected = "sensor calibrated to 0.4 ms";
-		expect(recallScore("the sensor was calibrated to 0.4 ms", expected).verdict).toBe("hit");
-		expect(recallScore("we painted the garage", expected).similarity).toBe(0);
-		expect(recallScore("sensor drift reduced", expected).verdict).toBe("partial");
-		const unknown = recallScore("I don't know – that is not in the context.", expected);
-		expect(unknown.similarity).toBe(0);
-		expect(unknown.unknown).toBe(true);
-		expect(unknown.verdict).toBe("miss");
-		expect(recallScore(undefined, expected).verdict).toBe("miss");
-		expect(recallSaysUnknown("there is no record of that here")).toBe(true);
-		expect(recallSaysUnknown("the sensor reads 0.4 ms now")).toBe(false);
-		expect(recallJudgeScore("Answer: 2")).toBe(2);
-		expect(recallJudgeScore("I cannot rate this")).toBeUndefined();
+	it("reads the judge's verdict and decides the cases that need no judge", () => {
+		expect(recallJudgeVerdict("CORRECT")).toBe("correct");
+		expect(recallJudgeVerdict("Verdict: wrong – it talks about another turn")).toBe("wrong");
+		expect(recallJudgeVerdict("partial")).toBe("partial");
+		expect(recallJudgeVerdict("UNKNOWN.")).toBe("unknown");
+		expect(recallJudgeVerdict("I cannot rate this")).toBe("unscored");
+		expect(recallJudgeVerdict(undefined)).toBe("unscored");
+		// an empty answer is unknown, a tool call written as text (no tools declared) is a lookup
+		expect(recallPreVerdict(undefined, false)).toBe("unknown");
+		expect(recallPreVerdict("  ", true)).toBe("unknown");
+		const asText =
+			"Let me search the protocol.  <tool_call> <function=protocol_search> <parameter=keywords> pipewire </parameter> </function> </tool_call>";
+		expect(recallWantsLookup(asText)).toBe(true);
+		expect(recallPreVerdict(asText, false)).toBe("lookup");
+		// with tools the loop ran the lookups; the final text goes to the judge
+		expect(recallPreVerdict(asText, true)).toBeUndefined();
+		expect(recallPreVerdict("the sensor was calibrated to 0.4 ms", false)).toBeUndefined();
+		expect(recallWantsLookup("the sensor reads 0.4 ms now")).toBe(false);
+	});
+
+	it("gives the judge the question, the record and the answer, and lets details be missing", () => {
+		const prompt = recallJudgePrompt("What was decided?", "sensor calibrated to 0.4 ms", "we calibrated it");
+		expect(prompt).toContain("Question: What was decided?");
+		expect(prompt).toContain("Record: sensor calibrated to 0.4 ms");
+		expect(prompt).toContain("Answer: we calibrated it");
+		expect(prompt).toContain("does not need its numbers");
+		for (const word of ["CORRECT", "PARTIAL", "UNKNOWN", "WRONG"]) expect(prompt).toContain(word);
 	});
 
 	it("sums up a mixed run and shows both sides of the comparison", () => {
 		const expected = "sensor calibrated to 0.4 ms";
 		const item = (turn: number): RecallItem => ({ turn, userEntryId: `u${turn}`, question: "q?", expected });
-		const hit = recallScore("the sensor was calibrated to 0.4 ms", expected);
-		const miss = recallScore("I don't know", expected);
 		const rows: RecallTurnResult[] = [
-			{ item: item(3), a: hit, b: miss },
-			{ item: item(9), a: miss, b: miss },
+			{
+				item: item(3),
+				a: { text: "the sensor was calibrated to 0.4 ms", verdict: "correct", similarity: 0.8 },
+				b: { text: "no idea", verdict: "unknown", similarity: 0 },
+			},
+			{
+				item: item(9),
+				a: { text: "it was about the reverb", verdict: "wrong", similarity: 0 },
+				b: { text: "<tool_call>", verdict: "lookup", similarity: 0 },
+			},
 		];
 		const totalsA = recallTotals(rows.map((r) => r.a));
-		expect(totalsA.hits).toBe(1);
-		expect(totalsA.misses).toBe(1);
-		expect(totalsA.mean).toBeGreaterThan(0);
-		const text = recallReport(rows, { fold: false, modelCalls: 4 }).join("\n");
-		expect(text).toContain("A: 1 hits, 0 partial, 1 misses");
-		expect(text).toContain("B: 0 hits, 0 partial, 2 misses");
-		expect(text).toContain("model calls: 4");
+		expect(totalsA.correct).toBe(1);
+		expect(totalsA.wrong).toBe(1);
+		expect(totalsA.meanSimilarity).toBe(0.4);
+		expect(recallTotalsLine(totalsA)).toBe("1 correct, 1 wrong");
+		const text = recallReport(rows, { fold: false, tools: false, modelCalls: 6 }).join("\n");
+		expect(text).toContain("A: 1 correct, 1 wrong");
+		expect(text).toContain("B: 1 unknown, 1 lookup");
+		expect(text).toContain("model calls: 6");
 		expect(text).toContain("stored state of work was used as it is, without a model call");
-		expect(text).toContain("## Turn 3 — A: hit");
+		expect(text).toContain("The requests carried no tools");
+		expect(text).toContain("## Turn 3 — A: correct");
 		expect(text).toContain("Answer A: the sensor was calibrated to 0.4 ms");
-		// with --fold the report says the state was folded for the run
-		expect(recallReport(rows, { fold: true, modelCalls: 9 }).join("\n")).toContain("folded with the model");
+		// with --fold and --tools the report says so, and counts the lookups
+		const withTools: RecallTurnResult[] = rows.map((r) => ({ ...r, a: { ...r.a, toolCalls: 2 } }));
+		const t2 = recallReport(withTools, { fold: true, tools: true, modelCalls: 9 }).join("\n");
+		expect(t2).toContain("folded with the model");
+		expect(t2).toContain("had the lookup tools");
+		expect(t2).toContain("A: 1 correct, 1 wrong · 4 lookups");
+		expect(t2).toContain("| 3 | correct (2 lookups) |");
 	});
 
 	it("puts the turns that are still verbatim behind the summary", () => {

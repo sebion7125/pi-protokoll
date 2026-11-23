@@ -97,21 +97,25 @@ import {
 	RECALL_ANSWER_TOKENS,
 	RECALL_DEFAULT_ITEMS,
 	RECALL_ENTRY,
-	RECALL_HIT,
 	RECALL_MAX_ITEMS,
+	RECALL_TOOL_ROUNDS,
+	type RecallAnswer,
 	type RecallEntryData,
 	type RecallItem,
+	type RecallTotals,
+	type RecallTotalsV1,
 	type RecallTurnResult,
 	rebuildRequested,
 	recallCandidates,
 	recallExpected,
 	recallJudgePrompt,
-	recallJudgeScore,
+	recallJudgeVerdict,
 	recallPick,
+	recallPreVerdict,
 	recallQuestion,
 	recallReport,
-	recallScore,
 	recallTotals,
+	recallTotalsLine,
 	recallVerbatim,
 	renderStatus,
 	renderSummary,
@@ -127,6 +131,7 @@ import {
 	sessionState,
 	sessionStats,
 	shortenPrompt,
+	similarity,
 	staleSwitchEntries,
 	statsSummary,
 	statsTable,
@@ -421,7 +426,7 @@ export function protocolModel(ctx: ExtensionContext, reference: string) {
 async function callModel(
 	ctx: ExtensionContext,
 	config: Pick<ProtocolConfig, "auxiliaryModel">,
-	context: { messages: unknown[] },
+	context: { messages: unknown[]; tools?: unknown[] },
 	options: Record<string, unknown>,
 	progress?: { bar: Progress; step: Step },
 ): Promise<ModelReply> {
@@ -1528,101 +1533,140 @@ export default function protokoll(pi: ExtensionAPI) {
 		details: { disabled: true },
 	});
 
+	// The three lookups as plain functions: the registered tools call them, and so does
+	// `/protokoll recall --tools`, which runs them in its own small tool loop.
+	const lookupTools = {
+		[TOOL_NAME]: {
+			description:
+				"Return the original text of an earlier turn of this session (user message, answers, tool calls, shortened tool output; thinking omitted). Use it when the session protocol mentions a turn whose details you need. Turn numbers are those shown in the session protocol.",
+			parameters: Type.Object({
+				turn: Type.Integer({ minimum: 1, description: "Turn number as shown in the session protocol" }),
+			}),
+		},
+		[READ_TOOL]: {
+			description:
+				'Return the full stored protocols of earlier turns of this session (user message verbatim, result, decisions, files, open items, rules). Much shorter than protocol_turn. Use it for turns listed in the index of the session protocol. Argument: turn numbers and ranges, e.g. "12, 40-44" (at most 30 turns).',
+			parameters: Type.Object({
+				turns: Type.String({ description: 'Turn numbers and ranges, e.g. "12, 40-44"' }),
+			}),
+		},
+		[SEARCH_TOOL]: {
+			description:
+				"Search earlier turns of this session by keywords (user messages, protocols, final answers). Returns turn numbers with a short excerpt, best matches first. Use it to find where something was decided or discussed, then read the turn with protocol_turn.",
+			parameters: Type.Object({
+				query: Type.String({ description: "Keywords, e.g. file names, function names, topics" }),
+				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum number of hits" })),
+			}),
+		},
+	};
+
+	function lookupTurn(branch: PlainEntry[], n: number): { text: string; details: Record<string, unknown> } {
+		const turns = collectTurns(branch);
+		const turn = turns[n - 1];
+		if (!turn)
+			throw new Error(
+				`Turn ${n} does not exist: this session has only ${turns.length} turn${turns.length === 1 ? "" : "s"} so far. ` +
+					"Turn numbers come from the index of the session protocol; do not try further numbers. " +
+					"Whatever is still visible in the conversation needs no lookup.",
+			);
+		const full = serializeTurn(turn.entries, 4000);
+		const text = clip(full, config.lookupMaxTokens * 4, "output limit of protocol_turn reached");
+		return {
+			text: `Turn ${turn.number}, original text (thinking omitted):\n\n${text}`,
+			details: { turn: turn.number, chars: full.length, truncated: text.length < full.length },
+		};
+	}
+
+	function lookupRead(branch: PlainEntry[], spec: string): { text: string; details: Record<string, unknown> } {
+		const turns = collectTurns(branch);
+		const protocols = collectProtocols(branch);
+		const wanted = [...decodeRanges(spec)].sort((a, b) => a - b).slice(0, 30);
+		if (!wanted.length) throw new Error(`No turn numbers in "${spec}"; this session has ${turns.length} turns.`);
+		const parts: string[] = [];
+		for (const n of wanted) {
+			const turn = turns[n - 1];
+			if (!turn) {
+				parts.push(`### Turn ${n}\n(does not exist; this session has ${turns.length} turns)`);
+				continue;
+			}
+			const f = protocols.get(turn.userEntryId)?.fields;
+			const lines = [
+				`### Turn ${n}`,
+				`User: ${turnUserText(turn.entries, 3000, `full text via protocol_turn(${n})`)}`,
+			];
+			if (!f) lines.push(`(no protocol for this turn; protocol_turn(${n}) returns the transcript)`);
+			else {
+				for (const r of f.result) lines.push(`Result: ${r}`);
+				for (const d of f.decision) lines.push(`Decision: ${d}`);
+				if (f.files.length) lines.push(`Files: ${f.files.join(", ")}`);
+				for (const o of f.open.filter((x) => !isNoneItem(x))) lines.push(`Open then: ${o}`);
+				for (const r of f.rule.filter((x) => !isNoneItem(x))) lines.push(`Rule: ${r}`);
+				for (const r of f.revoke) lines.push(`Revoked: ${r}`);
+				for (const o of f.other) lines.push(`Note: ${o}`);
+				if (f.tags?.length) lines.push(`Tags: ${f.tags.join(", ")}`);
+			}
+			parts.push(lines.join("\n"));
+		}
+		const text = clipToTokens(
+			parts.join("\n\n"),
+			config.lookupMaxTokens,
+			"output limit of protocol_read reached; ask for fewer turns",
+		);
+		return { text, details: { turns: wanted.length } };
+	}
+
+	function lookupSearch(
+		branch: PlainEntry[],
+		query: string,
+		limit?: number,
+	): { text: string; details: Record<string, unknown> } {
+		const max = Math.min(limit ?? config.searchMaxResults, config.searchMaxResults);
+		const hits = searchTurns(branch, query, max);
+		if (!hits.length) return { text: `No turn matches "${query}".`, details: { hits: 0 } };
+		const text = clipToTokens(hits.map((h) => h.text).join("\n\n"), 3000, "more hits cut; refine the query");
+		return { text, details: { hits: hits.length } };
+	}
+
+	/** Runs one lookup by name; used by the recall tool loop. */
+	function runLookup(branch: PlainEntry[], name: string, args: Record<string, unknown>): string {
+		if (name === TOOL_NAME) return lookupTurn(branch, Number(args.turn)).text;
+		if (name === READ_TOOL) return lookupRead(branch, String(args.turns ?? "")).text;
+		if (name === SEARCH_TOOL)
+			return lookupSearch(branch, String(args.query ?? ""), typeof args.limit === "number" ? args.limit : undefined)
+				.text;
+		throw new Error(`Unknown tool ${name}; available: ${TOOL_NAME}, ${READ_TOOL}, ${SEARCH_TOOL}.`);
+	}
+
 	pi.registerTool({
 		name: TOOL_NAME,
 		label: "protokoll: read turn",
-		description:
-			"Return the original text of an earlier turn of this session (user message, answers, tool calls, shortened tool output; thinking omitted). Use it when the session protocol mentions a turn whose details you need. Turn numbers are those shown in the session protocol.",
-		parameters: Type.Object({
-			turn: Type.Integer({ minimum: 1, description: "Turn number as shown in the session protocol" }),
-		}),
+		...lookupTools[TOOL_NAME],
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (!enabled) return disabledToolResult();
-			const turns = collectTurns(plainBranch(ctx));
-			const turn = turns[params.turn - 1];
-			if (!turn)
-				throw new Error(
-					`Turn ${params.turn} does not exist: this session has only ${turns.length} turn${turns.length === 1 ? "" : "s"} so far. ` +
-						"Turn numbers come from the index of the session protocol; do not try further numbers. " +
-						"Whatever is still visible in the conversation needs no lookup.",
-				);
-			const full = serializeTurn(turn.entries, 4000);
-			const text = clip(full, config.lookupMaxTokens * 4, "output limit of protocol_turn reached");
-			return {
-				content: [{ type: "text", text: `Turn ${turn.number}, original text (thinking omitted):\n\n${text}` }],
-				details: { turn: turn.number, chars: full.length, truncated: text.length < full.length },
-			};
+			const r = lookupTurn(plainBranch(ctx), params.turn);
+			return { content: [{ type: "text", text: r.text }], details: r.details };
 		},
 	});
 
 	pi.registerTool({
 		name: READ_TOOL,
 		label: "protokoll: read protocols",
-		description:
-			'Return the full stored protocols of earlier turns of this session (user message verbatim, result, decisions, files, open items, rules). Much shorter than protocol_turn. Use it for turns listed in the index of the session protocol. Argument: turn numbers and ranges, e.g. "12, 40-44" (at most 30 turns).',
-		parameters: Type.Object({
-			turns: Type.String({ description: 'Turn numbers and ranges, e.g. "12, 40-44"' }),
-		}),
+		...lookupTools[READ_TOOL],
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (!enabled) return disabledToolResult();
-			const branch = plainBranch(ctx);
-			const turns = collectTurns(branch);
-			const protocols = collectProtocols(branch);
-			const wanted = [...decodeRanges(params.turns)].sort((a, b) => a - b).slice(0, 30);
-			if (!wanted.length)
-				throw new Error(`No turn numbers in "${params.turns}"; this session has ${turns.length} turns.`);
-			const parts: string[] = [];
-			for (const n of wanted) {
-				const turn = turns[n - 1];
-				if (!turn) {
-					parts.push(`### Turn ${n}\n(does not exist; this session has ${turns.length} turns)`);
-					continue;
-				}
-				const f = protocols.get(turn.userEntryId)?.fields;
-				const lines = [
-					`### Turn ${n}`,
-					`User: ${turnUserText(turn.entries, 3000, `full text via protocol_turn(${n})`)}`,
-				];
-				if (!f) lines.push(`(no protocol for this turn; protocol_turn(${n}) returns the transcript)`);
-				else {
-					for (const r of f.result) lines.push(`Result: ${r}`);
-					for (const d of f.decision) lines.push(`Decision: ${d}`);
-					if (f.files.length) lines.push(`Files: ${f.files.join(", ")}`);
-					for (const o of f.open.filter((x) => !isNoneItem(x))) lines.push(`Open then: ${o}`);
-					for (const r of f.rule.filter((x) => !isNoneItem(x))) lines.push(`Rule: ${r}`);
-					for (const r of f.revoke) lines.push(`Revoked: ${r}`);
-					for (const o of f.other) lines.push(`Note: ${o}`);
-					if (f.tags?.length) lines.push(`Tags: ${f.tags.join(", ")}`);
-				}
-				parts.push(lines.join("\n"));
-			}
-			const text = clipToTokens(
-				parts.join("\n\n"),
-				config.lookupMaxTokens,
-				"output limit of protocol_read reached; ask for fewer turns",
-			);
-			return { content: [{ type: "text", text }], details: { turns: wanted.length } };
+			const r = lookupRead(plainBranch(ctx), params.turns);
+			return { content: [{ type: "text", text: r.text }], details: r.details };
 		},
 	});
 
 	pi.registerTool({
 		name: SEARCH_TOOL,
 		label: "protokoll: search turns",
-		description:
-			"Search earlier turns of this session by keywords (user messages, protocols, final answers). Returns turn numbers with a short excerpt, best matches first. Use it to find where something was decided or discussed, then read the turn with protocol_turn.",
-		parameters: Type.Object({
-			query: Type.String({ description: "Keywords, e.g. file names, function names, topics" }),
-			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Maximum number of hits" })),
-		}),
+		...lookupTools[SEARCH_TOOL],
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			if (!enabled) return disabledToolResult();
-			const max = Math.min(params.limit ?? config.searchMaxResults, config.searchMaxResults);
-			const hits = searchTurns(plainBranch(ctx), params.query, max);
-			if (!hits.length) {
-				return { content: [{ type: "text", text: `No turn matches "${params.query}".` }], details: { hits: 0 } };
-			}
-			const text = clipToTokens(hits.map((h) => h.text).join("\n\n"), 3000, "more hits cut; refine the query");
-			return { content: [{ type: "text", text }], details: { hits: hits.length } };
+			const r = lookupSearch(plainBranch(ctx), params.query, params.limit);
+			return { content: [{ type: "text", text: r.text }], details: r.details };
 		},
 	});
 
@@ -1685,14 +1729,17 @@ export default function protokoll(pi: ExtensionAPI) {
 	pi.registerEntryRenderer<RecallEntryData>(RECALL_ENTRY, (entry, { expanded }, theme) => {
 		const d = entry.data;
 		if (!d) return undefined;
+		const side = (t: RecallTotals | RecallTotalsV1): string =>
+			"hits" in t ? `${t.hits} hits, mean ${t.mean}` : recallTotalsLine(t);
 		const head =
-			`▸ protokoll recall ${d.items} turns (${d.at.slice(0, 10)}): with state of work ${d.withState.hits} hits, ` +
-			`mean ${d.withState.mean} · without ${d.withoutState.hits} hits, mean ${d.withoutState.mean}`;
+			`▸ protokoll recall ${d.items} turns (${d.at.slice(0, 10)}${d.tools ? ", with lookup tools" : ""}): ` +
+			`with state of work ${side(d.withState)} · without ${side(d.withoutState)}`;
 		if (!expanded) return new Text(theme.fg("dim", head), 1, 0);
+		const scoring = d.version === 1 ? `hit from similarity ${d.threshold}` : "scored by a judge request";
 		return new Text(
 			theme.fg(
 				"dim",
-				`${head}\n  turns: ${d.turns.join(", ")} · model calls: ${d.modelCalls} · fold: ${d.fold ? "with the model" : "stored state"} · hit from similarity ${d.threshold}`,
+				`${head}\n  turns: ${d.turns.join(", ")} · model calls: ${d.modelCalls} · fold: ${d.fold ? "with the model" : "stored state"} · ${scoring}`,
 			),
 			1,
 			0,
@@ -1708,7 +1755,7 @@ export default function protokoll(pi: ExtensionAPI) {
 	 */
 	async function runRecall(
 		count: number,
-		opts: { fold: boolean; judge: boolean; seed: number; file: string },
+		opts: { fold: boolean; tools: boolean; seed: number; file: string },
 		ctx: ExtensionContext,
 	): Promise<void> {
 		const branch = plainBranch(ctx);
@@ -1762,8 +1809,10 @@ export default function protokoll(pi: ExtensionAPI) {
 			return;
 		}
 		ctx.ui.notify(
-			`protokoll recall: ${items.length} items × 2 contexts = ${items.length * 2} model calls` +
-				(opts.judge ? ` + ${items.length * 2} for judging` : "") +
+			`protokoll recall: ${items.length} items × 2 contexts = ${items.length * 2} answers + ${items.length * 2} judge calls` +
+				(opts.tools
+					? `, each answer may take up to ${RECALL_TOOL_ROUNDS} lookup rounds (one model call each)`
+					: "") +
 				(opts.fold ? " (the state of work was updated with the model)" : " (no fold: the stored state is used)") +
 				` · ${candidates.length} of ${turns.length} turns are candidates (outside the detail tier)`,
 			"info",
@@ -1786,36 +1835,96 @@ export default function protokoll(pi: ExtensionAPI) {
 			return;
 		}
 
-		const rows: RecallTurnResult[] = [];
+		const tools = opts.tools
+			? Object.entries(lookupTools).map(([name, t]) => ({
+					name,
+					description: t.description,
+					parameters: t.parameters,
+				}))
+			: undefined;
 		let calls = 0;
+		/** One answer: without tools a single request, with tools a small loop that runs the lookups. */
+		const answer = async (prompt: string): Promise<{ text?: string; toolCalls: number }> => {
+			if (!tools) {
+				calls++;
+				return { text: await ask(ctx, prompt, RECALL_ANSWER_TOKENS, signal, undefined, "off"), toolCalls: 0 };
+			}
+			let messages: unknown[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
+			let toolCalls = 0;
+			for (let round = 0; round <= RECALL_TOOL_ROUNDS; round++) {
+				const last = round === RECALL_TOOL_ROUNDS;
+				calls++;
+				const reply = await callModel(
+					ctx,
+					config,
+					// the last round has no tools: the model has to answer with what it found
+					last ? { messages } : { messages, tools },
+					{ maxTokens: RECALL_ANSWER_TOKENS, ...(signal ? { signal } : {}), ...reasoningOption("off") },
+				);
+				if (reply.error !== undefined) return { text: undefined, toolCalls };
+				const blocks = (
+					(reply.message?.content as {
+						type?: string;
+						id?: string;
+						name?: string;
+						arguments?: Record<string, unknown>;
+					}[]) ?? []
+				).filter((c) => c?.type === "toolCall");
+				if (!reply.toolCall || !blocks.length || last) return { text: reply.text || undefined, toolCalls };
+				toolCalls += blocks.length;
+				messages = [
+					...messages,
+					reply.message,
+					...blocks.map((c) => {
+						let text: string;
+						let isError = false;
+						try {
+							text = runLookup(branch, c.name ?? "", c.arguments ?? {});
+						} catch (err) {
+							text = err instanceof Error ? err.message : String(err);
+							isError = true;
+						}
+						return {
+							role: "toolResult" as const,
+							toolCallId: c.id ?? "",
+							toolName: c.name ?? "",
+							content: [{ type: "text", text }],
+							isError,
+							timestamp: Date.now(),
+						};
+					}),
+				];
+			}
+			return { text: undefined, toolCalls };
+		};
+		const judge = async (item: RecallItem, text: string | undefined): Promise<RecallAnswer> => {
+			const pre = recallPreVerdict(text, opts.tools);
+			const sim = text ? similarity(text, item.expected) : 0;
+			if (pre) return { text, verdict: pre, similarity: sim };
+			calls++;
+			const reply = await ask(
+				ctx,
+				recallJudgePrompt(item.question, item.expected, text ?? ""),
+				16,
+				signal,
+				undefined,
+				"off",
+			);
+			return { text, verdict: recallJudgeVerdict(reply), similarity: sim };
+		};
+
+		const rows: RecallTurnResult[] = [];
 		for (const item of items) {
 			if (stop()) break;
-			const answerA = await ask(ctx, `${textA}\n\n${item.question}`, RECALL_ANSWER_TOKENS, signal, undefined, "off");
-			calls++;
-			const answerB = await ask(ctx, `${textB}\n\n${item.question}`, RECALL_ANSWER_TOKENS, signal, undefined, "off");
-			calls++;
-			const ra = recallScore(answerA, item.expected);
-			const rb = recallScore(answerB, item.expected);
-			if (opts.judge && !signal?.aborted) {
-				const judgeA = await ask(
-					ctx,
-					recallJudgePrompt(item.expected, answerA ?? ""),
-					32,
-					signal,
-					undefined,
-					"off",
-				);
-				const judgeB = await ask(
-					ctx,
-					recallJudgePrompt(item.expected, answerB ?? ""),
-					32,
-					signal,
-					undefined,
-					"off",
-				);
-				calls += 2;
-				ra.judge = recallJudgeScore(judgeA);
-				rb.judge = recallJudgeScore(judgeB);
+			const ansA = await answer(`${textA}\n\n${item.question}`);
+			if (stop()) break;
+			const ansB = await answer(`${textB}\n\n${item.question}`);
+			if (stop()) break;
+			const ra = await judge(item, ansA.text);
+			const rb = await judge(item, ansB.text);
+			if (opts.tools) {
+				ra.toolCalls = ansA.toolCalls;
+				rb.toolCalls = ansB.toolCalls;
 			}
 			rows.push({ item, a: ra, b: rb });
 		}
@@ -1824,7 +1933,7 @@ export default function protokoll(pi: ExtensionAPI) {
 		const withState = recallTotals(rows.map((r) => r.a));
 		const withoutState = recallTotals(rows.map((r) => r.b));
 		pi.appendEntry<RecallEntryData>(RECALL_ENTRY, {
-			version: 1,
+			version: 2,
 			at: new Date().toISOString(),
 			items: rows.length,
 			turns: rows.map((r) => r.item.turn),
@@ -1832,12 +1941,12 @@ export default function protokoll(pi: ExtensionAPI) {
 			withoutState,
 			modelCalls: calls,
 			fold: opts.fold,
-			threshold: RECALL_HIT,
+			tools: opts.tools,
 		});
 		const short =
-			`recall over ${rows.length} turns – with state of work: ${withState.hits} hits / ${withState.partial} partial / ` +
-			`${withState.misses} misses (mean ${withState.mean}); without: ${withoutState.hits} / ${withoutState.partial} / ` +
-			`${withoutState.misses} (mean ${withoutState.mean}) · ${calls} model calls`;
+			`recall over ${rows.length} turns${opts.tools ? " (with lookup tools)" : ""} – with state of work: ${recallTotalsLine(withState)}` +
+			`${opts.tools ? ` (${withState.toolCalls} lookups)` : ""}; without: ${recallTotalsLine(withoutState)}` +
+			`${opts.tools ? ` (${withoutState.toolCalls} lookups)` : ""} · ${calls} model calls`;
 		if (opts.file) {
 			const file = outputPath(opts.file, ctx.cwd);
 			if (existsSync(file)) {
@@ -1847,7 +1956,7 @@ export default function protokoll(pi: ExtensionAPI) {
 					return;
 				}
 			}
-			const text = `${recallReport(rows, { fold: opts.fold, modelCalls: calls }).join("\n")}\n`;
+			const text = `${recallReport(rows, { fold: opts.fold, tools: opts.tools, modelCalls: calls }).join("\n")}\n`;
 			try {
 				writeFileSync(file, text, "utf8");
 				ctx.ui.notify(`protokoll: ${short}\nreport written: ${file}`, "info");
@@ -1897,7 +2006,7 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	pi.registerCommand("protokoll", {
 		description:
-			"Session protocol: status | show | export [file] | stats [--file <path>] | recall [n] [--fold] [--judge] [--seed N] [--file <path>] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
+			"Session protocol: status | show | export [file] | stats [--file <path>] | recall [n] [--tools] [--fold] [--seed N] [--file <path>] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
 		getArgumentCompletions: (prefix) =>
 			SUB.filter((s) => s.startsWith(prefix.trim())).map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
@@ -2174,7 +2283,7 @@ export default function protokoll(pi: ExtensionAPI) {
 						count,
 						{
 							fold: rest.includes("--fold"),
-							judge: rest.includes("--judge"),
+							tools: rest.includes("--tools"),
 							seed: Number.parseInt(of("seed") ?? "0", 10) || 0,
 							file: of("file") ?? "",
 						},

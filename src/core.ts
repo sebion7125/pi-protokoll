@@ -2668,32 +2668,41 @@ export function statsSummary(stats: SessionStats): string {
 export const RECALL_ENTRY = "protokoll-recall";
 
 export interface RecallEntryData {
-	version: 1;
+	/** 1: scored by word overlap (hits/partial/misses/mean); 2: scored by a judge request */
+	version: 1 | 2;
 	/** when the run happened */
 	at: string;
 	items: number;
 	/** the turns that were asked about */
 	turns: number[];
-	withState: RecallTotals;
-	withoutState: RecallTotals;
-	/** model calls the run took, including the fold when `--fold` was used */
+	withState: RecallTotals | RecallTotalsV1;
+	withoutState: RecallTotals | RecallTotalsV1;
+	/** model calls the run took, including judging and the fold when `--fold` was used */
 	modelCalls: number;
 	/** true: the state of work was folded with the model for this run */
 	fold: boolean;
-	/** the similarity from which an answer counts as a hit */
-	threshold: number;
+	/** true: the model had the lookup tools (version 2 only) */
+	tools?: boolean;
+	/** version 1 only: the similarity from which an answer counted as a hit */
+	threshold?: number;
+}
+
+/** Totals of a version-1 entry, still found in older sessions. */
+export interface RecallTotalsV1 {
+	hits: number;
+	partial: number;
+	misses: number;
+	mean: number;
 }
 
 export const RECALL_DEFAULT_ITEMS = 5;
 export const RECALL_MAX_ITEMS = 20;
-/** at this similarity the fact is considered still present in the context */
-export const RECALL_HIT = 0.25;
-/** below this the answer says something else than the protocol recorded */
-export const RECALL_PARTIAL = 0.1;
+/** tool rounds one `--tools` answer may take before it has to answer */
+export const RECALL_TOOL_ROUNDS = 6;
 /** how much of the user's own wording the question quotes */
 export const RECALL_QUESTION_CHARS = 300;
 /** answer budget of one recall request, also the room kept free in the window check */
-export const RECALL_ANSWER_TOKENS = 300;
+export const RECALL_ANSWER_TOKENS = 400;
 /** shorter user messages ("yes, go ahead") give no question that names the subject */
 export const RECALL_MIN_USER_CHARS = 20;
 
@@ -2775,91 +2784,94 @@ export function recallVerbatim(turns: Turn[], config: ProtocolConfig): string {
 	].join("\n\n");
 }
 
-/** Phrases with which a model says it cannot see the turn any more. */
-const RECALL_UNKNOWN = [
-	"not in the context",
-	"not in my context",
-	"no longer in the context",
-	"nothing in the context",
-	"no information about",
-	"no information on",
-	"i don t know",
-	"i do not know",
-	"i cannot see",
-	"i can t see",
-	"i have no",
-	"no record of",
-	"no mention of",
-	"not mentioned",
-	"not stated",
-	"does not appear",
-	"doesn t appear",
-	"unable to find",
-	"cannot answer",
-	"can t answer",
-	"insufficient information",
-	"not available",
-];
-
-export function recallSaysUnknown(text: string): boolean {
-	// norm() drops the apostrophes, so "I don't know" is matched as "i don t know"
-	const s = ` ${norm(text)} `;
-	return RECALL_UNKNOWN.some((p) => s.includes(p));
+/**
+ * True when an answer given without tools tries to call one anyway – as text, because the request
+ * declared no tools. The model wanted to look the turn up, which is the right move in a session.
+ */
+export function recallWantsLookup(text: string | undefined): boolean {
+	if (!text) return false;
+	return /<tool_call>|<function=|"name"\s*:\s*"protocol_|\bprotocol_(search|turn|read)\s*\(/i.test(text);
 }
 
-export type RecallVerdict = "hit" | "partial" | "miss";
+/**
+ * How an answer is rated. The judge (a model call) decides between correct, partial, unknown and
+ * wrong; `lookup` is set without a judge when an answer without tools tried to call one; `unscored`
+ * when the judge gave no usable verdict.
+ *  - correct: states the core result or decision of the turn (details may be missing)
+ *  - partial: part of the core is right, important parts are missing or off
+ *  - unknown: says it does not know or cannot find it
+ *  - wrong:   asserts a result or decision that does not match – worse than not knowing
+ */
+export type RecallVerdict = "correct" | "partial" | "unknown" | "wrong" | "lookup" | "unscored";
+
+export const RECALL_VERDICTS: RecallVerdict[] = ["correct", "partial", "unknown", "wrong", "lookup", "unscored"];
 
 export interface RecallAnswer {
 	text?: string;
-	similarity: number;
-	unknown: boolean;
 	verdict: RecallVerdict;
-	/** the model's own rating (0/1/2) when `--judge` was used */
-	judge?: number;
+	/** word overlap with the expected text – shown for information, not used for the verdict */
+	similarity: number;
+	/** lookup tools the model called before it answered (`--tools` only) */
+	toolCalls?: number;
 }
 
-/** Scoring without a second model: an unknown answer is 0, otherwise the word overlap. */
-export function recallScore(answer: string | undefined, expected: string): RecallAnswer {
-	if (!answer || !answer.trim() || recallSaysUnknown(answer)) return { similarity: 0, unknown: true, verdict: "miss" };
-	const sim = similarity(answer, expected);
-	const verdict: RecallVerdict = sim >= RECALL_HIT ? "hit" : sim >= RECALL_PARTIAL ? "partial" : "miss";
-	return { text: answer, similarity: sim, unknown: false, verdict };
+/** What the judge is asked. The record is detailed; a correct answer only needs its core. */
+export function recallJudgePrompt(question: string, expected: string, answer: string): string {
+	return [
+		"You check whether an answer about an earlier turn of a coding session matches what was recorded for that turn.",
+		"The record is detailed; an answer does not need its numbers, line numbers or every detail to be correct.",
+		"",
+		"Reply with exactly one word:",
+		"CORRECT – the answer states the core result or decision of the record",
+		"PARTIAL – part of the core is right, but important parts are missing or off",
+		"UNKNOWN – the answer says it does not know, cannot find it, or only says how it would look it up",
+		"WRONG – the answer asserts a result or decision that does not match the record (for example about a different turn or topic)",
+		"",
+		`Question: ${question}`,
+		"",
+		`Record: ${expected}`,
+		"",
+		`Answer: ${answer}`,
+	].join("\n");
 }
 
-/** What the judge was asked, and how its answer is read. */
-export function recallJudgePrompt(expected: string, answer: string): string {
-	return (
-		"Rate the answer below against the text it should reflect.\n" +
-		"0 = wrong or says it does not know, 1 = partially right, 2 = states the same facts.\n" +
-		"Answer with a single digit.\n\nText: " +
-		expected +
-		"\n\nAnswer: " +
-		answer
-	);
+export function recallJudgeVerdict(text: string | undefined): RecallVerdict {
+	const m = text ? /\b(CORRECT|PARTIAL|UNKNOWN|WRONG)\b/i.exec(text) : null;
+	return m ? (m[1].toLowerCase() as RecallVerdict) : "unscored";
 }
 
-export function recallJudgeScore(text: string | undefined): number | undefined {
-	const m = text ? /\b([012])\b/.exec(text) : undefined;
-	return m ? Number.parseInt(m[1], 10) : undefined;
+/**
+ * The verdict that needs no judge, or undefined when the judge has to decide: an empty answer is
+ * unknown, a tool call written as text (no tools declared) is a lookup.
+ */
+export function recallPreVerdict(answer: string | undefined, withTools: boolean): RecallVerdict | undefined {
+	if (!answer || !answer.trim()) return "unknown";
+	if (!withTools && recallWantsLookup(answer)) return "lookup";
+	return undefined;
 }
 
-export interface RecallTotals {
-	hits: number;
-	partial: number;
-	misses: number;
-	/** mean similarity over all items */
-	mean: number;
-}
+export type RecallTotals = Record<RecallVerdict, number> & {
+	/** mean word overlap, for information */
+	meanSimilarity: number;
+	/** lookup tools called over all items (`--tools` only) */
+	toolCalls: number;
+};
 
 export function recallTotals(rows: RecallAnswer[]): RecallTotals {
-	if (!rows.length) return { hits: 0, partial: 0, misses: 0, mean: 0 };
-	const mean = rows.reduce((s, r) => s + r.similarity, 0) / rows.length;
+	const t = Object.fromEntries(RECALL_VERDICTS.map((v) => [v, 0])) as Record<RecallVerdict, number>;
+	for (const r of rows) t[r.verdict]++;
+	const mean = rows.length ? rows.reduce((s, r) => s + r.similarity, 0) / rows.length : 0;
 	return {
-		hits: rows.filter((r) => r.verdict === "hit").length,
-		partial: rows.filter((r) => r.verdict === "partial").length,
-		misses: rows.filter((r) => r.verdict === "miss").length,
-		mean: Math.round(mean * 1000) / 1000,
+		...t,
+		meanSimilarity: Math.round(mean * 1000) / 1000,
+		toolCalls: rows.reduce((s, r) => s + (r.toolCalls ?? 0), 0),
 	};
+}
+
+/** "2 correct, 1 partial, 1 unknown, 1 wrong" – only the verdicts that occurred. */
+export function recallTotalsLine(t: RecallTotals): string {
+	const parts = RECALL_VERDICTS.filter((v) => t[v] > 0).map((v) => `${t[v]} ${v}`);
+	return parts.length ? parts.join(", ") : "nothing";
 }
 
 export interface RecallTurnResult {
@@ -2871,23 +2883,28 @@ export interface RecallTurnResult {
 }
 
 const recallAnswerLine = (a: RecallAnswer): string =>
-	`${a.verdict} (similarity ${a.similarity.toFixed(2)}${a.unknown ? ", says it cannot see the turn" : ""}${
-		typeof a.judge === "number" ? `, judged ${a.judge}/2` : ""
-	})`;
+	`${a.verdict}${typeof a.toolCalls === "number" ? ` (${a.toolCalls} lookups)` : ""}`;
 
 /** The whole run as Markdown: one block per item, totals at the end. */
-export function recallReport(rows: RecallTurnResult[], meta: { fold: boolean; modelCalls: number }): string[] {
+export function recallReport(
+	rows: RecallTurnResult[],
+	meta: { fold: boolean; tools: boolean; modelCalls: number },
+): string[] {
 	const a = recallTotals(rows.map((r) => r.a));
 	const b = recallTotals(rows.map((r) => r.b));
 	const out = [
 		"# protokoll recall",
 		"",
-		"Does the summary still hold the facts of turns that left the context? The same questions were",
+		"Does the model still know the facts of turns that left the context? The same questions were",
 		"asked twice: against the summary as it stands (A) and against the same summary with the state of",
 		"work removed (B). " +
 			(meta.fold
 				? "The state of work was folded with the model for this run."
-				: "The stored state of work was used as it is, without a model call."),
+				: "The stored state of work was used as it is, without a model call.") +
+			" " +
+			(meta.tools
+				? "The model had the lookup tools (protocol_search, protocol_read, protocol_turn), as in a real session."
+				: "The requests carried no tools: what counts is what the summary alone still holds."),
 		"",
 		"| turn | A (with state of work) | B (without) |",
 		"|---|---|---|",
@@ -2895,14 +2912,16 @@ export function recallReport(rows: RecallTurnResult[], meta: { fold: boolean; mo
 	for (const r of rows) out.push(`| ${r.item.turn} | ${recallAnswerLine(r.a)} | ${recallAnswerLine(r.b)} |`);
 	out.push(
 		"",
-		`A: ${a.hits} hits, ${a.partial} partial, ${a.misses} misses · mean similarity ${a.mean}`,
-		`B: ${b.hits} hits, ${b.partial} partial, ${b.misses} misses · mean similarity ${b.mean}`,
+		`A: ${recallTotalsLine(a)}${meta.tools ? ` · ${a.toolCalls} lookups` : ""}`,
+		`B: ${recallTotalsLine(b)}${meta.tools ? ` · ${b.toolCalls} lookups` : ""}`,
 		`model calls: ${meta.modelCalls}`,
-		`a hit starts at similarity ${RECALL_HIT}`,
 		"",
-		"Legend: expected = what the protocol of that turn recorded as result and decision; the",
-		"question only quotes the user's own words, so the protocol text is never part of it. The",
-		"requests carry no tools: what counts is what the summary alone still holds.",
+		"Legend: the verdict comes from a judge request that compares the answer with what the protocol of",
+		"that turn recorded as result and decision. correct = the core is right (details may be missing);",
+		"partial = part of it; unknown = says it does not know; wrong = asserts something that does not",
+		"match (worse than unknown); lookup = tried to call a lookup tool although none was available;",
+		"unscored = the judge gave no usable verdict. The question only quotes the user's own words, so",
+		"the protocol text is never part of it.",
 		"",
 	);
 	for (const r of rows) {

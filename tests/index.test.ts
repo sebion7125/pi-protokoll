@@ -23,7 +23,9 @@ import protokoll, { forceThinkingLevel, outputPath, Progress } from "../src/inde
 
 type Handler = (event: any, ctx: any) => any;
 
-function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) {
+type ModelAnswer = string | { toolCall: { name: string; arguments: Record<string, unknown> } };
+
+function harness(modelAnswers: ModelAnswer[] = [], config?: Record<string, unknown>) {
 	process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-agent-"));
 	// the test window is tiny (10 000 tokens), so the status gets a matching budget
 	writeFileSync(
@@ -128,9 +130,13 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 			find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
 			streamSimple: (model: unknown, context: any, options: any) => {
 				requests.push({ model, context, options });
-				const text = modelAnswers.shift() ?? "";
+				const next = modelAnswers.shift() ?? "";
+				if (typeof next !== "string") {
+					const call = { type: "toolCall", id: `call-${requests.length}`, ...next.toolCall };
+					return { result: async () => ({ role: "assistant", content: [call], stopReason: "toolUse" }) };
+				}
 				return {
-					result: async () => ({ role: "assistant", content: [{ type: "text", text }], stopReason: "stop" }),
+					result: async () => ({ role: "assistant", content: [{ type: "text", text: next }], stopReason: "stop" }),
 				};
 			},
 		},
@@ -229,6 +235,8 @@ function harness(modelAnswers: string[] = [], config?: Record<string, unknown>) 
 		commands,
 		notes,
 		requests,
+		/** queued model answers; tests can push more after setup */
+		answers: modelAnswers,
 		widgets,
 		turn,
 		addUser,
@@ -1175,20 +1183,18 @@ describe("protokoll extension", () => {
 		);
 	});
 
-	it("asks every recall question twice and sends no tools with it", async () => {
+	it("asks every recall question twice, sends no tools with it and lets a judge rate the answers", async () => {
 		// a small detail tier, so the older turns are left only as index lines: those are the ones asked about
 		h = harness(
 			[
-				"a1\n<protocol>result: sensor 1 calibrated to 0.4 ms</protocol>",
-				"a2\n<protocol>result: sensor 2 calibrated to 0.4 ms</protocol>",
-				"a3\n<protocol>result: sensor 3 calibrated to 0.4 ms</protocol>",
-				"a4\n<protocol>result: sensor 4 calibrated to 0.4 ms</protocol>",
-				"a5\n<protocol>result: sensor 5 calibrated to 0.4 ms</protocol>",
-				"a6\n<protocol>result: sensor 6 calibrated to 0.4 ms</protocol>",
+				// per item: answer A, answer B, judge A, judge B
 				"it was calibrated to 0.4 ms",
+				"Let me look it up. <tool_call> <function=protocol_search> <parameter=query> sensor </parameter> </function> </tool_call>",
+				"CORRECT",
+				"it was the reverb",
 				"not in my memory",
-				"the drift was fixed",
-				"i cannot answer that",
+				"WRONG",
+				"UNKNOWN",
 			],
 			{ detailMaxTokens: 20, keepRecentTurns: 1, consolidate: false },
 		);
@@ -1203,27 +1209,32 @@ describe("protokoll extension", () => {
 		await h.commands.get("protokoll").handler("recall 2", h.ctx);
 
 		const mine = h.requests.slice(before);
-		// two requests per item: one against the summary as it stands, one without the state of work
-		expect(mine).toHaveLength(4);
-		for (const r of mine) {
+		// item 1: two answers + one judge call (the written tool call is a lookup without a judge);
+		// item 2: two answers + two judge calls
+		expect(mine).toHaveLength(7);
+		const answers = mine.filter((r) => !String(r.context.messages[0].content).includes("Record:"));
+		expect(answers).toHaveLength(4);
+		for (const r of answers) {
 			expect(r.context.messages).toHaveLength(1);
-			expect(r.context.messages[0].role).toBe("user");
 			expect(r.context.messages[0].content).toContain("Earlier in this session I asked:");
 			expect(r.context.tools).toBeUndefined();
 			expect(r.options.tools).toBeUndefined();
-			expect(r.options.maxTokens).toBe(300);
 		}
 		// the question quotes the user, never the protocol of the turn it asks about
-		expect(mine[0].context.messages[0].content).toContain("why does the sensor drift");
+		expect(answers[0].context.messages[0].content).toContain("why does the sensor drift");
 
 		// the session keeps everything it had and gains exactly one entry
-		expect(h.branch.filter((e) => e.customType === "protokoll-recall")).toHaveLength(1);
 		expect(h.branch.length).toBe(branchBefore + 1);
 		const stored = h.branch.find((e) => e.customType === "protokoll-recall")?.data as any;
+		expect(stored.version).toBe(2);
 		expect(stored.items).toBe(2);
-		expect(stored.turns).toHaveLength(2);
-		expect(stored.modelCalls).toBe(4);
-		expect(stored.fold).toBe(false);
+		expect(stored.tools).toBe(false);
+		expect(stored.modelCalls).toBe(7);
+		expect(stored.withState.correct).toBe(1);
+		expect(stored.withState.wrong).toBe(1);
+		expect(stored.withoutState.lookup).toBe(1);
+		expect(stored.withoutState.unknown).toBe(1);
+		expect(h.notes.at(-1)).toContain("with state of work: 1 correct, 1 wrong; without: 1 unknown, 1 lookup");
 
 		// --file writes the whole comparison, not only the counts
 		const file = join(h.ctx.cwd, "recall.md");
@@ -1235,6 +1246,49 @@ describe("protokoll extension", () => {
 		expect(md).toContain("Expected (from the protocol):");
 		expect(md).toContain("Answer A:");
 		expect(md).toContain("Answer B:");
+	});
+
+	it("with --tools runs the lookups the model asks for and counts them", async () => {
+		h = harness([], { detailMaxTokens: 20, keepRecentTurns: 1, consolidate: false });
+		await h.fire("session_start", { reason: "startup" });
+		for (let i = 1; i <= 6; i++)
+			await h.turn(
+				`question ${i}: why does the sensor drift?`,
+				`a${i}\n<protocol>result: sensor ${i} calibrated to 0.4 ms</protocol>`,
+			);
+		h.answers.push(
+			// A: one search, then the answer
+			{ toolCall: { name: "protocol_search", arguments: { query: "sensor drift" } } },
+			"sensor calibrated to 0.4 ms",
+			// B: answers right away
+			"no idea",
+			// judges
+			"CORRECT",
+			"UNKNOWN",
+		);
+		const before = h.requests.length;
+		await h.commands.get("protokoll").handler("recall 1 --tools", h.ctx);
+		const mine = h.requests.slice(before);
+		expect(mine).toHaveLength(5);
+		// answer requests carry the three lookup tools
+		expect(mine[0].context.tools.map((t: any) => t.name).sort()).toEqual([
+			"protocol_read",
+			"protocol_search",
+			"protocol_turn",
+		]);
+		// the second round got the search result back as a tool result
+		const second = mine[1].context.messages;
+		const result = second.find((m: any) => m.role === "toolResult");
+		expect(result.toolName).toBe("protocol_search");
+		expect(result.isError).toBe(false);
+		expect(result.content[0].text).toMatch(/sensor/i);
+		const stored = h.branch.filter((e) => e.customType === "protokoll-recall").at(-1)?.data as any;
+		expect(stored.tools).toBe(true);
+		expect(stored.withState.correct).toBe(1);
+		expect(stored.withState.toolCalls).toBe(1);
+		expect(stored.withoutState.unknown).toBe(1);
+		expect(h.notes.at(-1)).toContain("(with lookup tools)");
+		expect(h.notes.at(-1)).toContain("1 correct (1 lookups)");
 	});
 
 	it("does not take the value of --seed as the number of items, and says when it caps the count", async () => {

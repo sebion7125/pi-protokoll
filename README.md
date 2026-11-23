@@ -157,7 +157,7 @@ otherwise the extension loads twice. Your `protokoll.json` and all session data 
 | `/protokoll show` | preview of the summary (no model call; turns not yet folded appear as single lines) |
 | `/protokoll export [file]` | the same as a Markdown file, plus a diagnostics part: effective configuration, all compactions, the stored state with reviewed rules, a table of all turns and all protocols in full |
 | `/protokoll stats [--file <path>]` | numbers per compaction: what the context held before the cut, what the next request carried afterwards (system prompt, summary, turns kept word for word), how long the pass took, the turn counts, plus session totals and the prompt-cache reads; `--file` writes the whole table as Markdown |
-| `/protokoll recall [n] [--fold] [--judge] [--seed N] [--file <path>]` | measures what the summary still knows: takes n turns that left the context and are no longer quoted in the detail tier of the summary – there the protocol stands word for word, so asking would test nothing – (default 5, at most 20, spread evenly over the session), asks what their result or decision was – once against the summary as it stands (A) and once with the state of work removed (B) – and scores both against what the protocol recorded. The requests carry no tools, so only what the summary itself holds can answer |
+| `/protokoll recall [n] [--tools] [--fold] [--seed N] [--file <path>]` | measures what the summary still knows: takes n turns that left the context and are no longer quoted in the detail tier of the summary – there the protocol stands word for word, so asking would test nothing – (default 5, at most 20, spread evenly over the session), asks what their result or decision was – once against the summary as it stands (A) and once with the state of work removed (B) – and a judge request rates each answer against what the protocol recorded: correct, partial, unknown or wrong (wrong = asserts something that does not match, worse than not knowing). Without `--tools` the requests carry no tools, so only what the summary itself holds can answer (an answer that tries to call a lookup tool anyway counts as lookup); with `--tools` the model has `protocol_search`, `protocol_read` and `protocol_turn`, as in a real session, and the report counts its lookups |
 | `/protokoll pin N` / `unpin N` | keep turn N verbatim at compaction |
 | `/protokoll on` / `off` | enable or disable for this session. `off` keeps prompt and tool list byte-identical and withdraws the rules with one message (prefix cache stays); the protocol tools answer `pi-protokoll is disabled` |
 | `/protokoll off --strip` | hard off: the section leaves the system prompt and the protocol tools are unregistered, so the next request reads the whole context again (once). Needs no withdrawal message |
@@ -171,9 +171,9 @@ prompt + summary + turns kept word for word). Both are estimates at 4 characters
 estimate Pi uses. A compaction from an older version shows `–`, because those numbers were not
 stored then; nothing is guessed.
 
-Recall says the number of model calls before it starts: `n` items × 2 contexts. It uses the stored
-state of work unless `--fold` asks for a fresh fold, scores without a second model unless `--judge`
-lets the model rate as well, and writes one `protokoll-recall` entry so later runs are comparable –
+Recall says the number of model calls before it starts: `n` items × 2 contexts, plus one judge call
+per answer, plus up to six lookup rounds per answer with `--tools`. It uses the stored state of work
+unless `--fold` asks for a fresh fold, and writes one `protokoll-recall` entry so later runs are comparable –
 nothing else in the session changes. The same arguments pick the same turns again (`--seed` rotates
 the list first).
 
