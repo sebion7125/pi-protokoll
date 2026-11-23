@@ -3,7 +3,7 @@
  * the model is a scripted stub. Checks the wiring, not Pi itself.
  */
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -19,7 +19,7 @@ import {
 	type ProtocolEntryData,
 	tok,
 } from "../src/core.ts";
-import protokoll, { forceThinkingLevel, Progress } from "../src/index.ts";
+import protokoll, { forceThinkingLevel, outputPath, Progress } from "../src/index.ts";
 
 type Handler = (event: any, ctx: any) => any;
 
@@ -1579,5 +1579,14 @@ describe("protokoll extension", () => {
 		expect(text).toContain("### Turn 3\n(does not exist");
 		await afterCompaction(h);
 		expect(h.activeTools()).toContain("protocol_read");
+	});
+});
+
+describe("outputPath", () => {
+	it("expands ~ to the home folder and keeps relative paths in the working directory", () => {
+		expect(outputPath("~/recall.md", "/work")).toBe(join(homedir(), "recall.md"));
+		expect(outputPath("~", "/work")).toBe(homedir());
+		expect(outputPath("out/recall.md", "/work")).toBe(join("/work", "out/recall.md"));
+		expect(outputPath("/tmp/recall.md", "/work")).toBe("/tmp/recall.md");
 	});
 });

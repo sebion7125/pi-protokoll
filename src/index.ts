@@ -21,7 +21,8 @@
  */
 
 import { existsSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, estimateTokens, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -487,6 +488,17 @@ export function forceThinkingLevel(payload: unknown, model: { api?: string }, le
 		body.reasoning_effort = level;
 	}
 	return body;
+}
+
+/**
+ * Where a `--file` argument points: `~` and `~/…` mean the home folder (the shell does not expand
+ * them inside a Pi command), anything relative is relative to the session's working directory.
+ */
+export function outputPath(name: string, cwd: string): string {
+	const trimmed = name.trim();
+	if (trimmed === "~") return homedir();
+	if (trimmed.startsWith("~/")) return join(homedir(), trimmed.slice(2));
+	return isAbsolute(trimmed) ? trimmed : join(cwd, trimmed);
 }
 
 export default function protokoll(pi: ExtensionAPI) {
@@ -1742,6 +1754,13 @@ export default function protokoll(pi: ExtensionAPI) {
 			question: recallQuestion(turnUserText(t.entries)),
 			expected: recallExpected(protocols.get(t.userEntryId)),
 		}));
+		if (opts.file && !existsSync(dirname(outputPath(opts.file, ctx.cwd)))) {
+			ctx.ui.notify(
+				`protokoll recall: the folder for ${outputPath(opts.file, ctx.cwd)} does not exist – nothing was asked`,
+				"warning",
+			);
+			return;
+		}
 		ctx.ui.notify(
 			`protokoll recall: ${items.length} items × 2 contexts = ${items.length * 2} model calls` +
 				(opts.judge ? ` + ${items.length * 2} for judging` : "") +
@@ -1820,7 +1839,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			`${withState.misses} misses (mean ${withState.mean}); without: ${withoutState.hits} / ${withoutState.partial} / ` +
 			`${withoutState.misses} (mean ${withoutState.mean}) · ${calls} model calls`;
 		if (opts.file) {
-			const file = isAbsolute(opts.file) ? opts.file : join(ctx.cwd, opts.file);
+			const file = outputPath(opts.file, ctx.cwd);
 			if (existsSync(file)) {
 				const ok = ctx.hasUI && (await ctx.ui.confirm("Overwrite file?", file));
 				if (!ok) {
@@ -1828,8 +1847,19 @@ export default function protokoll(pi: ExtensionAPI) {
 					return;
 				}
 			}
-			writeFileSync(file, `${recallReport(rows, { fold: opts.fold, modelCalls: calls }).join("\n")}\n`, "utf8");
-			ctx.ui.notify(`protokoll: ${short}\nreport written: ${file}`, "info");
+			const text = `${recallReport(rows, { fold: opts.fold, modelCalls: calls }).join("\n")}\n`;
+			try {
+				writeFileSync(file, text, "utf8");
+				ctx.ui.notify(`protokoll: ${short}\nreport written: ${file}`, "info");
+			} catch (err) {
+				// the answers cost model calls: keep them in the working directory instead of losing them
+				const fallback = join(ctx.cwd, `protokoll-recall-${Date.now()}.md`);
+				writeFileSync(fallback, text, "utf8");
+				ctx.ui.notify(
+					`protokoll: ${short}\ncould not write ${file} (${err instanceof Error ? err.message : String(err)}); report written: ${fallback}`,
+					"warning",
+				);
+			}
 			return;
 		}
 		ctx.ui.notify(
@@ -1940,7 +1970,7 @@ export default function protokoll(pi: ExtensionAPI) {
 						return;
 					}
 					const name = rest.join(" ") || `protokoll-${ctx.sessionManager.getSessionId()}.md`;
-					const file = isAbsolute(name) ? name : join(ctx.cwd, name);
+					const file = outputPath(name, ctx.cwd);
 					if (existsSync(file)) {
 						const ok = ctx.hasUI && (await ctx.ui.confirm("Overwrite file?", file));
 						if (!ok) {
@@ -2098,7 +2128,7 @@ export default function protokoll(pi: ExtensionAPI) {
 							...STATS_LEGEND.map((l) => `  ${l}`),
 						].join("\n");
 					if (name) {
-						const file = isAbsolute(name) ? name : join(ctx.cwd, name);
+						const file = outputPath(name, ctx.cwd);
 						if (existsSync(file)) {
 							const ok = ctx.hasUI && (await ctx.ui.confirm("Overwrite file?", file));
 							if (!ok) {
