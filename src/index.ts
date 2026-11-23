@@ -20,7 +20,7 @@
  * Commands: /protokoll [status|show|export [file]|pin N|unpin N|on|off|reload|rebuild|repair]
  */
 
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -146,6 +146,27 @@ import {
 	turnHasWork,
 	turnUserText,
 } from "./core.ts";
+import {
+	ABSTAIN_ANSWER,
+	abstainQuestionPrompt,
+	askText,
+	factQuestionPrompt,
+	formatQuestionFile,
+	genUserText,
+	MAX_GENERATED_QUESTIONS,
+	parseGenerated,
+	parseQuestionFile,
+	type QuestionResult,
+	questionJudgePrompt,
+	questionLeaks,
+	questionReport,
+	questionSummaryLine,
+	type RecallQuestion,
+	recordOf,
+	topicLines,
+	updatePairs,
+	updateQuestionPrompt,
+} from "./questions.ts";
 
 const SECTION_KEY = "session_protocol";
 const TOOL_NAME = "protocol_turn";
@@ -1772,14 +1793,14 @@ export default function protokoll(pi: ExtensionAPI) {
 		const side = (t: RecallTotals | RecallTotalsV1): string =>
 			"hits" in t ? `${t.hits} hits, mean ${t.mean}` : recallTotalsLine(t);
 		const head =
-			`▸ protokoll recall ${d.items} turns (${d.at.slice(0, 10)}${d.tools ? ", with lookup tools" : ""}): ` +
+			`▸ protokoll recall ${d.items} ${d.questions ? "questions from a question set" : "turns"} (${d.at.slice(0, 10)}${d.tools ? ", with lookup tools" : ""}): ` +
 			`with state of work ${side(d.withState)} · without ${side(d.withoutState)}`;
 		if (!expanded) return new Text(theme.fg("dim", head), 1, 0);
 		const scoring = d.version === 1 ? `hit from similarity ${d.threshold}` : "scored by a judge request";
 		return new Text(
 			theme.fg(
 				"dim",
-				`${head}\n  turns: ${d.turns.join(", ")} · model calls: ${d.modelCalls} · fold: ${d.fold ? "with the model" : "stored state"} · ${scoring}`,
+				`${head}${d.questions ? `\n  question set: ${d.questions}` : ""}\n  turns: ${d.turns.join(", ")} · model calls: ${d.modelCalls} · fold: ${d.fold ? "with the model" : "stored state"} · ${scoring}`,
 			),
 			1,
 			0,
@@ -1788,76 +1809,36 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	// ------------------------------------------------------------------ command
 
-	/**
-	 * `/protokoll recall`: asks what the summary still holds of turns that left the context – twice,
-	 * against the summary as the settings would build it (A) and against the same one without the
-	 * state of work (B). Nothing in the session changes but one `protokoll-recall` entry.
-	 */
-	async function runRecall(
-		count: number,
-		opts: { fold: boolean; tools: boolean; seed: number; file: string },
-		ctx: ExtensionContext,
-	): Promise<void> {
+	/** The two contexts every recall run asks against: the summary as it stands (A) and without the state of work (B). */
+	interface RecallSetup {
+		branch: PlainEntry[];
+		turns: Turn[];
+		protocols: Map<string, ProtocolEntryData>;
+		cutIndex: number;
+		/** user entry ids of the turns left only as index line or in the state of work */
+		older: Set<string>;
+		/** user entry ids of the turns quoted in the detail tier */
+		detail: Set<string>;
+		textA: string;
+		textB: string;
+	}
+
+	/** Builds A and B; undefined (after a notice) when aborted or when the contexts do not fit the window. */
+	async function recallSetup(ctx: ExtensionContext, fold: boolean, label: string): Promise<RecallSetup | undefined> {
 		const branch = plainBranch(ctx);
 		const turns = collectTurns(branch);
 		const protocols = collectProtocols(branch);
 		// the same boundary /protokoll show uses: everything before it is gone from the context
 		const keepFrom = turns.length > config.keepRecentTurns ? turns[turns.length - config.keepRecentTurns] : undefined;
 		const cutIndex = keepFrom ? keepFrom.index : branch.length;
-		if (!recallCandidates(turns, protocols, cutIndex).length) {
-			ctx.ui.notify(
-				"protokoll recall: nothing to ask – every turn with a protocol is still in the context word for word",
-				"warning",
-			);
-			return;
-		}
 		const signal = ctx.signal;
-		const stop = () => {
-			if (signal?.aborted) ctx.ui.notify("protokoll recall: aborted", "warning");
-			return signal?.aborted === true;
-		};
-		if (opts.fold)
-			ctx.ui.notify("protokoll recall: updating the state of work with the model first (--fold)", "info");
-		const a = await assemble(branch, cutIndex, false, ctx, opts.fold, signal, undefined, undefined);
-		if (stop()) return;
+		if (fold) ctx.ui.notify(`${label}: updating the state of work with the model first (--fold)`, "info");
+		const a = await assemble(branch, cutIndex, false, ctx, fold, signal, undefined, undefined);
+		if (signal?.aborted) return undefined;
 		const b = await assemble(branch, cutIndex, false, ctx, false, signal, undefined, undefined, {
 			stateOfWork: false,
 		});
-		if (stop()) return;
-		// only turns the summary no longer quotes in its detail tier: there the protocol stands word
-		// for word, so the answer would be in the context with and without the state of work
-		const older = new Set(a.plan.older.map((t) => t.userEntryId));
-		const candidates = recallCandidates(turns, protocols, cutIndex, older);
-		if (!candidates.length) {
-			ctx.ui.notify(
-				"protokoll recall: nothing to ask – the turns that left the context are all still quoted in the detail tier of the summary",
-				"warning",
-			);
-			return;
-		}
-		const items: RecallItem[] = recallPick(candidates, count, opts.seed).map((t) => ({
-			turn: t.number,
-			userEntryId: t.userEntryId,
-			question: recallQuestion(turnUserText(t.entries)),
-			expected: recallExpected(protocols.get(t.userEntryId)),
-		}));
-		if (opts.file && !existsSync(dirname(outputPath(opts.file, ctx.cwd)))) {
-			ctx.ui.notify(
-				`protokoll recall: the folder for ${outputPath(opts.file, ctx.cwd)} does not exist – nothing was asked`,
-				"warning",
-			);
-			return;
-		}
-		ctx.ui.notify(
-			`protokoll recall: ${items.length} items × 2 contexts = ${items.length * 2} answers + ${items.length * 2} judge calls` +
-				(opts.tools
-					? `, each answer may take up to ${RECALL_TOOL_ROUNDS} lookup rounds (one model call each)`
-					: "") +
-				(opts.fold ? " (the state of work was updated with the model)" : " (no fold: the stored state is used)") +
-				` · ${candidates.length} of ${turns.length} turns are candidates (outside the detail tier)`,
-			"info",
-		);
-
+		if (signal?.aborted) return undefined;
 		const verbatim = recallVerbatim(
 			turns.filter((t) => t.index >= cutIndex),
 			config,
@@ -1868,36 +1849,49 @@ export default function protokoll(pi: ExtensionAPI) {
 		const sizes = [tok(textA), tok(textB)];
 		if (window && sizes.some((v) => v + RECALL_ANSWER_TOKENS > window)) {
 			ctx.ui.notify(
-				`protokoll recall: stopped – the test context is ≈${fmt(Math.max(...sizes))} tokens, ` +
+				`${label}: stopped – the test context is ≈${fmt(Math.max(...sizes))} tokens, ` +
 					`which leaves no room for the answer in a ${fmt(window)} token window`,
 				"error",
 			);
-			return;
+			return undefined;
 		}
+		return {
+			branch,
+			turns,
+			protocols,
+			cutIndex,
+			older: new Set(a.plan.older.map((t) => t.userEntryId)),
+			detail: new Set(a.plan.detail.map((d) => d.turn.userEntryId)),
+			textA,
+			textB,
+		};
+	}
 
-		const tools = opts.tools
+	/**
+	 * Answers one recall question: without tools a single request, with tools a small loop that runs
+	 * the lookups (the last round has no tools, so the model has to answer with what it found).
+	 * `counter.calls` counts every model call.
+	 */
+	function recallAnswerer(
+		ctx: ExtensionContext,
+		branch: PlainEntry[],
+		bar: Progress,
+		withTools: boolean,
+		counter: { calls: number },
+	) {
+		const signal = ctx.signal;
+		const tools = withTools
 			? Object.entries(lookupTools).map(([name, t]) => ({
 					name,
 					description: t.description,
 					parameters: t.parameters,
 				}))
 			: undefined;
-		let calls = 0;
-		/** One answer: without tools a single request, with tools a small loop that runs the lookups. */
-		// one step per answer and per judge call; the running one shows the model's text as it arrives
-		const bar = new Progress(ctx, "protokoll recall", undefined, 240);
-		const stepsOf = new Map<RecallItem, { a: Step; b: Step; judge: Step }>();
-		for (const item of items)
-			stepsOf.set(item, {
-				a: bar.add(`turn ${item.turn} · A (with state of work)`),
-				b: bar.add(`turn ${item.turn} · B (without)`),
-				judge: bar.add(`turn ${item.turn} · judge`),
-			});
-		const answer = async (prompt: string, step: Step): Promise<{ text?: string; toolCalls: number }> => {
+		return async (prompt: string, step: Step): Promise<{ text?: string; toolCalls: number }> => {
 			const base = step.label;
 			bar.start(step);
 			if (!tools) {
-				calls++;
+				counter.calls++;
 				const text = await ask(ctx, prompt, RECALL_ANSWER_TOKENS, signal, { bar, step }, "off");
 				bar.finish(step, text !== undefined);
 				return { text, toolCalls: 0 };
@@ -1906,11 +1900,10 @@ export default function protokoll(pi: ExtensionAPI) {
 			let toolCalls = 0;
 			for (let round = 0; round <= RECALL_TOOL_ROUNDS; round++) {
 				const last = round === RECALL_TOOL_ROUNDS;
-				calls++;
+				counter.calls++;
 				const reply = await callModel(
 					ctx,
 					config,
-					// the last round has no tools: the model has to answer with what it found
 					last ? { messages } : { messages, tools },
 					{ maxTokens: RECALL_ANSWER_TOKENS, ...(signal ? { signal } : {}), ...reasoningOption("off") },
 					{ bar, step },
@@ -1965,30 +1958,153 @@ export default function protokoll(pi: ExtensionAPI) {
 			bar.finish(step, false);
 			return { text: undefined, toolCalls };
 		};
-		const judge = async (item: RecallItem, text: string | undefined): Promise<RecallAnswer> => {
-			const pre = recallPreVerdict(text, opts.tools);
-			const sim = text ? similarity(text, item.expected) : 0;
-			if (pre) return { text, verdict: pre, similarity: sim };
-			calls++;
-			const reply = await ask(
-				ctx,
-				recallJudgePrompt(item.question, item.expected, text ?? ""),
-				16,
-				signal,
-				undefined,
-				"off",
+	}
+
+	/** Rates one answer: without a judge when the verdict is plain, otherwise with a judge request. */
+	async function recallJudge(
+		ctx: ExtensionContext,
+		text: string | undefined,
+		withTools: boolean,
+		expected: string,
+		prompt: () => string,
+		counter: { calls: number },
+	): Promise<RecallAnswer> {
+		const pre = recallPreVerdict(text, withTools);
+		const sim = text && expected ? similarity(text, expected) : 0;
+		if (pre) return { text, verdict: pre, similarity: sim };
+		counter.calls++;
+		const reply = await ask(ctx, prompt(), 16, ctx.signal, undefined, "off");
+		return { text, verdict: recallJudgeVerdict(reply), similarity: sim };
+	}
+
+	/** Writes a report; asks before overwriting, falls back to the working directory if writing fails. */
+	async function writeReport(
+		ctx: ExtensionContext,
+		target: string,
+		text: string,
+		fallbackName: string,
+		short: string,
+	): Promise<void> {
+		const file = outputPath(target, ctx.cwd);
+		if (existsSync(file)) {
+			const ok = ctx.hasUI && (await ctx.ui.confirm("Overwrite file?", file));
+			if (!ok) {
+				const fallback = join(ctx.cwd, `${fallbackName}-${Date.now()}.md`);
+				writeFileSync(fallback, text, "utf8");
+				ctx.ui.notify(`protokoll: ${short}\n${file} already exists, report written: ${fallback}`, "warning");
+				return;
+			}
+		}
+		try {
+			writeFileSync(file, text, "utf8");
+			ctx.ui.notify(`protokoll: ${short}\nreport written: ${file}`, "info");
+		} catch (err) {
+			// the answers cost model calls: keep them in the working directory instead of losing them
+			const fallback = join(ctx.cwd, `${fallbackName}-${Date.now()}.md`);
+			writeFileSync(fallback, text, "utf8");
+			ctx.ui.notify(
+				`protokoll: ${short}\ncould not write ${file} (${err instanceof Error ? err.message : String(err)}); report written: ${fallback}`,
+				"warning",
 			);
-			return { text, verdict: recallJudgeVerdict(reply), similarity: sim };
+		}
+	}
+
+	/**
+	 * `/protokoll recall`: asks what the summary still holds of turns that left the context – twice,
+	 * against the summary as the settings would build it (A) and against the same one without the
+	 * state of work (B). Nothing in the session changes but one `protokoll-recall` entry.
+	 */
+	async function runRecall(
+		count: number,
+		opts: { fold: boolean; tools: boolean; seed: number; file: string },
+		ctx: ExtensionContext,
+	): Promise<void> {
+		{
+			const branch = plainBranch(ctx);
+			const turns = collectTurns(branch);
+			const keepFrom =
+				turns.length > config.keepRecentTurns ? turns[turns.length - config.keepRecentTurns] : undefined;
+			if (!recallCandidates(turns, collectProtocols(branch), keepFrom ? keepFrom.index : branch.length).length) {
+				ctx.ui.notify(
+					"protokoll recall: nothing to ask – every turn with a protocol is still in the context word for word",
+					"warning",
+				);
+				return;
+			}
+		}
+		const signal = ctx.signal;
+		const stop = () => {
+			if (signal?.aborted) ctx.ui.notify("protokoll recall: aborted", "warning");
+			return signal?.aborted === true;
 		};
+		if (opts.file && !existsSync(dirname(outputPath(opts.file, ctx.cwd)))) {
+			ctx.ui.notify(
+				`protokoll recall: the folder for ${outputPath(opts.file, ctx.cwd)} does not exist – nothing was asked`,
+				"warning",
+			);
+			return;
+		}
+		const setup = await recallSetup(ctx, opts.fold, "protokoll recall");
+		if (!setup) {
+			stop();
+			return;
+		}
+		const { turns, protocols, cutIndex } = setup;
+		// only turns the summary no longer quotes in its detail tier: there the protocol stands word
+		// for word, so the answer would be in the context with and without the state of work
+		const candidates = recallCandidates(turns, protocols, cutIndex, setup.older);
+		if (!candidates.length) {
+			ctx.ui.notify(
+				"protokoll recall: nothing to ask – the turns that left the context are all still quoted in the detail tier of the summary",
+				"warning",
+			);
+			return;
+		}
+		const items: RecallItem[] = recallPick(candidates, count, opts.seed).map((t) => ({
+			turn: t.number,
+			userEntryId: t.userEntryId,
+			question: recallQuestion(turnUserText(t.entries)),
+			expected: recallExpected(protocols.get(t.userEntryId)),
+		}));
+		ctx.ui.notify(
+			`protokoll recall: ${items.length} items × 2 contexts = ${items.length * 2} answers + ${items.length * 2} judge calls` +
+				(opts.tools
+					? `, each answer may take up to ${RECALL_TOOL_ROUNDS} lookup rounds (one model call each)`
+					: "") +
+				(opts.fold ? " (the state of work was updated with the model)" : " (no fold: the stored state is used)") +
+				` · ${candidates.length} of ${turns.length} turns are candidates (outside the detail tier)`,
+			"info",
+		);
+
+		const counter = { calls: 0 };
+		// one step per answer and per judge call; the running one shows the model's text as it arrives
+		const bar = new Progress(ctx, "protokoll recall", undefined, 240);
+		const answer = recallAnswerer(ctx, setup.branch, bar, opts.tools, counter);
+		const stepsOf = new Map<RecallItem, { a: Step; b: Step; judge: Step }>();
+		for (const item of items)
+			stepsOf.set(item, {
+				a: bar.add(`turn ${item.turn} · A (with state of work)`),
+				b: bar.add(`turn ${item.turn} · B (without)`),
+				judge: bar.add(`turn ${item.turn} · judge`),
+			});
+		const judge = (item: RecallItem, text: string | undefined) =>
+			recallJudge(
+				ctx,
+				text,
+				opts.tools,
+				item.expected,
+				() => recallJudgePrompt(item.question, item.expected, text ?? ""),
+				counter,
+			);
 
 		const rows: RecallTurnResult[] = [];
 		try {
 			for (const item of items) {
 				if (stop()) break;
 				const st = stepsOf.get(item) as { a: Step; b: Step; judge: Step };
-				const ansA = await answer(`${textA}\n\n${item.question}`, st.a);
+				const ansA = await answer(`${setup.textA}\n\n${item.question}`, st.a);
 				if (stop()) break;
-				const ansB = await answer(`${textB}\n\n${item.question}`, st.b);
+				const ansB = await answer(`${setup.textB}\n\n${item.question}`, st.b);
 				if (stop()) break;
 				bar.start(st.judge);
 				const ra = await judge(item, ansA.text);
@@ -2015,42 +2131,298 @@ export default function protokoll(pi: ExtensionAPI) {
 			turns: rows.map((r) => r.item.turn),
 			withState,
 			withoutState,
-			modelCalls: calls,
+			modelCalls: counter.calls,
 			fold: opts.fold,
 			tools: opts.tools,
 		});
 		const short =
 			`recall over ${rows.length} turns${opts.tools ? " (with lookup tools)" : ""} – with state of work: ${recallTotalsLine(withState)}` +
 			`${opts.tools ? ` (${withState.toolCalls} lookups)` : ""}; without: ${recallTotalsLine(withoutState)}` +
-			`${opts.tools ? ` (${withoutState.toolCalls} lookups)` : ""} · ${calls} model calls`;
+			`${opts.tools ? ` (${withoutState.toolCalls} lookups)` : ""} · ${counter.calls} model calls`;
 		if (opts.file) {
-			const file = outputPath(opts.file, ctx.cwd);
-			if (existsSync(file)) {
-				const ok = ctx.hasUI && (await ctx.ui.confirm("Overwrite file?", file));
-				if (!ok) {
-					ctx.ui.notify(`protokoll: not written, ${file} already exists`, "warning");
-					return;
-				}
-			}
-			const text = `${recallReport(rows, { fold: opts.fold, tools: opts.tools, modelCalls: calls }).join("\n")}\n`;
-			try {
-				writeFileSync(file, text, "utf8");
-				ctx.ui.notify(`protokoll: ${short}\nreport written: ${file}`, "info");
-			} catch (err) {
-				// the answers cost model calls: keep them in the working directory instead of losing them
-				const fallback = join(ctx.cwd, `protokoll-recall-${Date.now()}.md`);
-				writeFileSync(fallback, text, "utf8");
-				ctx.ui.notify(
-					`protokoll: ${short}\ncould not write ${file} (${err instanceof Error ? err.message : String(err)}); report written: ${fallback}`,
-					"warning",
-				);
-			}
+			const text = `${recallReport(rows, { fold: opts.fold, tools: opts.tools, modelCalls: counter.calls }).join("\n")}\n`;
+			await writeReport(ctx, opts.file, text, "protokoll-recall", short);
 			return;
 		}
 		ctx.ui.notify(
 			`${short}\n/protokoll recall ${count} --file <path> writes the questions, both answers and the scores.`,
 			"info",
 		);
+	}
+
+	/**
+	 * `/protokoll recall --make-questions`: lets the model write a question set from this session –
+	 * fact questions about turns that left the context, questions about things never discussed
+	 * (abstain) and questions whose answer changed during the session (update) – and writes it as a
+	 * Markdown file to curate. Nothing in the session changes.
+	 */
+	async function runMakeQuestions(
+		counts: { fact: number; abstain: number; update: number },
+		opts: { seed: number; file: string },
+		ctx: ExtensionContext,
+	): Promise<void> {
+		const label = "protokoll recall --make-questions";
+		const target = outputPath(opts.file || "protokoll-questions.md", ctx.cwd);
+		if (!existsSync(dirname(target))) {
+			ctx.ui.notify(`${label}: the folder for ${target} does not exist`, "warning");
+			return;
+		}
+		if (existsSync(target)) {
+			const ok = ctx.hasUI && (await ctx.ui.confirm("Overwrite file?", target));
+			if (!ok) {
+				ctx.ui.notify(`${label}: not written, ${target} already exists`, "warning");
+				return;
+			}
+		}
+		const branch = plainBranch(ctx);
+		const turns = collectTurns(branch);
+		const protocols = collectProtocols(branch);
+		const keepFrom = turns.length > config.keepRecentTurns ? turns[turns.length - config.keepRecentTurns] : undefined;
+		const cutIndex = keepFrom ? keepFrom.index : branch.length;
+		const signal = ctx.signal;
+		// fact questions only about turns the summary no longer quotes (same rule as plain recall)
+		const plan = await assemble(branch, cutIndex, false, ctx, false, signal, undefined, undefined);
+		if (signal?.aborted) return;
+		const older = new Set(plan.plan.older.map((t) => t.userEntryId));
+		const candidates = recallCandidates(turns, protocols, cutIndex, older);
+		const picked = recallPick(candidates, candidates.length, opts.seed, Number.POSITIVE_INFINITY);
+		// spread first: the first `fact` picks cover the session evenly, the rest are reserves
+		const first = recallPick(candidates, counts.fact, opts.seed, Number.POSITIVE_INFINITY);
+		const order = [...first, ...picked.filter((t) => !first.includes(t))];
+		const pairs = counts.update > 0 ? updatePairs(turns, protocols, cutIndex) : [];
+		ctx.ui.notify(
+			`${label}: ${counts.fact} fact, ${counts.abstain} abstain, ${counts.update} update questions wanted · ` +
+				`${candidates.length} turns outside the detail tier, ${pairs.length} possible revisions · ` +
+				"one model call per attempt",
+			"info",
+		);
+
+		const bar = new Progress(ctx, "protokoll questions", undefined, 240);
+		const factStep = bar.add(`fact questions 0/${counts.fact}`);
+		const abstainStep = counts.abstain ? bar.add(`abstain questions 0/${counts.abstain}`) : undefined;
+		const updateStep = counts.update ? bar.add(`update questions 0/${counts.update}`) : undefined;
+		const questions: RecallQuestion[] = [];
+		const notes: string[] = [];
+		let calls = 0;
+		const gen = async (prompt: string, step: Step, tokens = 400) => {
+			calls++;
+			return ask(ctx, prompt, tokens, signal, { bar, step }, "off");
+		};
+		const nextId = () => `Q${questions.length + 1}`;
+		try {
+			// fact
+			bar.start(factStep);
+			let made = 0;
+			let leaks = 0;
+			for (const t of order) {
+				if (made >= counts.fact || signal?.aborted) break;
+				// at most twice the wanted number of attempts
+				if (made + leaks >= counts.fact * 2 + 5) break;
+				const f = protocols.get(t.userEntryId)?.fields;
+				if (!f) continue;
+				const g = parseGenerated(await gen(factQuestionPrompt(genUserText(t), f), factStep))[0];
+				if (!g?.answer) continue;
+				if (questionLeaks(g.question, g.answer)) {
+					leaks++;
+					continue;
+				}
+				questions.push({ id: nextId(), kind: "fact", turn: t.number, question: g.question, answer: g.answer });
+				made++;
+				bar.relabel(factStep, `fact questions ${made}/${counts.fact}`);
+			}
+			bar.finish(factStep, made > 0, leaks ? `${leaks} dropped: the question gave the answer away` : undefined);
+			if (made < counts.fact) notes.push(`fact: ${made} of ${counts.fact} (not enough usable turns)`);
+
+			// abstain
+			if (abstainStep && !signal?.aborted) {
+				bar.start(abstainStep);
+				const topics = topicLines(turns, protocols);
+				const got = parseGenerated(
+					await gen(abstainQuestionPrompt(topics, counts.abstain), abstainStep, 800),
+				).slice(0, counts.abstain);
+				for (const g of got) {
+					const hit = searchTurns(branch, g.question, 1)[0];
+					questions.push({
+						id: nextId(),
+						kind: "abstain",
+						question: g.question,
+						answer: ABSTAIN_ANSWER,
+						check: hit
+							? `closest search hit: ${hit.text.split("\n")[0]} – make sure it does not answer the question`
+							: "no search hit at all",
+					});
+				}
+				bar.finish(abstainStep, got.length > 0, `${got.length}/${counts.abstain}`);
+				if (got.length < counts.abstain) notes.push(`abstain: ${got.length} of ${counts.abstain}`);
+			}
+
+			// update
+			if (updateStep && !signal?.aborted) {
+				bar.start(updateStep);
+				let done = 0;
+				let tried = 0;
+				for (const p of pairs) {
+					if (done >= counts.update || signal?.aborted || tried >= counts.update * 4 + 5) break;
+					tried++;
+					const g = parseGenerated(await gen(updateQuestionPrompt(p.older, p.newer), updateStep))[0];
+					if (!g?.answer || questionLeaks(g.question, g.answer)) continue;
+					questions.push({
+						id: nextId(),
+						kind: "update",
+						oldTurn: p.older.turn,
+						turn: p.newer.turn,
+						question: g.question,
+						answer: g.answer,
+						...(g.outdated ? { outdated: g.outdated } : {}),
+					});
+					done++;
+					bar.relabel(updateStep, `update questions ${done}/${counts.update} (${tried} pairs checked)`);
+				}
+				bar.finish(updateStep, done > 0, `${done}/${counts.update}, ${tried} pairs checked`);
+				if (done < counts.update) notes.push(`update: ${done} of ${counts.update} (${tried} pairs checked)`);
+			}
+		} finally {
+			bar.skipRest();
+			bar.close();
+		}
+		if (!questions.length) {
+			ctx.ui.notify(`${label}: no usable question – nothing written`, "warning");
+			return;
+		}
+		writeFileSync(
+			target,
+			formatQuestionFile(questions, { at: new Date().toISOString(), turns: turns.length }),
+			"utf8",
+		);
+		ctx.ui.notify(
+			`protokoll: ${questions.length} questions written to ${target} (${calls} model calls)` +
+				(notes.length ? `\n  ${notes.join("\n  ")}` : "") +
+				"\nCurate the file, then: /protokoll recall --questions <file> [--file <report>]",
+			"info",
+		);
+	}
+
+	/**
+	 * `/protokoll recall --questions <file>`: asks a frozen question set against A and B and reports
+	 * correct rates with Wilson intervals and the paired McNemar test. Lookup tools are on unless
+	 * `--no-tools` is given.
+	 */
+	async function runQuestionSet(
+		source: string,
+		opts: { fold: boolean; tools: boolean; file: string },
+		ctx: ExtensionContext,
+	): Promise<void> {
+		const label = "protokoll recall --questions";
+		const path = outputPath(source, ctx.cwd);
+		let raw: string;
+		try {
+			raw = readFileSync(path, "utf8");
+		} catch (err) {
+			ctx.ui.notify(`${label}: cannot read ${path} (${err instanceof Error ? err.message : String(err)})`, "error");
+			return;
+		}
+		const { questions, errors } = parseQuestionFile(raw);
+		if (!questions.length) {
+			ctx.ui.notify(
+				`${label}: no usable question in ${path}${errors.length ? `\n  ${errors.join("\n  ")}` : ""}`,
+				"error",
+			);
+			return;
+		}
+		const reportPath = opts.file || path.replace(/(\.md)?$/, ".results.md");
+		if (!existsSync(dirname(outputPath(reportPath, ctx.cwd)))) {
+			ctx.ui.notify(
+				`${label}: the folder for ${outputPath(reportPath, ctx.cwd)} does not exist – nothing was asked`,
+				"warning",
+			);
+			return;
+		}
+		const signal = ctx.signal;
+		const stop = () => {
+			if (signal?.aborted) ctx.ui.notify(`${label}: aborted`, "warning");
+			return signal?.aborted === true;
+		};
+		const setup = await recallSetup(ctx, opts.fold, label);
+		if (!setup) {
+			stop();
+			return;
+		}
+		const skipped = errors.map((e) => `${e} (not asked)`);
+		ctx.ui.notify(
+			`${label}: ${questions.length} questions × 2 contexts = ${questions.length * 2} answers + up to ${questions.length * 2} judge calls` +
+				(opts.tools ? `, each answer may take up to ${RECALL_TOOL_ROUNDS} lookup rounds` : ", no lookup tools") +
+				(errors.length ? ` · ${errors.length} sections of the file not usable` : ""),
+			"info",
+		);
+		const byNumber = new Map(setup.turns.map((t) => [t.number, t]));
+		const locate = (n: number | undefined): QuestionResult["location"] => {
+			if (n === undefined) return undefined;
+			const t = byNumber.get(n);
+			if (!t) return "missing";
+			if (t.index >= setup.cutIndex) return "kept";
+			return setup.detail.has(t.userEntryId) ? "detail" : "older";
+		};
+		const counter = { calls: 0 };
+		const bar = new Progress(ctx, "protokoll recall", undefined, 240);
+		const answer = recallAnswerer(ctx, setup.branch, bar, opts.tools, counter);
+		const steps = questions.map((q) => ({
+			a: bar.add(`${q.id} ${q.kind} · A (with state of work)`),
+			b: bar.add(`${q.id} ${q.kind} · B (without)`),
+			judge: bar.add(`${q.id} · judge`),
+		}));
+		const rows: QuestionResult[] = [];
+		try {
+			for (let i = 0; i < questions.length; i++) {
+				if (stop()) break;
+				const q = questions[i];
+				const st = steps[i];
+				const ansA = await answer(`${setup.textA}\n\n${askText(q)}`, st.a);
+				if (stop()) break;
+				const ansB = await answer(`${setup.textB}\n\n${askText(q)}`, st.b);
+				if (stop()) break;
+				const t = q.kind === "fact" && q.turn !== undefined ? byNumber.get(q.turn) : undefined;
+				const record = t ? recordOf(setup.protocols.get(t.userEntryId)) : "";
+				bar.start(st.judge);
+				const rate = (text: string | undefined) =>
+					recallJudge(ctx, text, opts.tools, q.answer, () => questionJudgePrompt(q, text ?? "", record), counter);
+				const ra = await rate(ansA.text);
+				const rb = await rate(ansB.text);
+				bar.finish(st.judge, true, `A ${ra.verdict} · B ${rb.verdict}`);
+				if (opts.tools) {
+					ra.toolCalls = ansA.toolCalls;
+					rb.toolCalls = ansB.toolCalls;
+				}
+				const location = locate(q.kind === "abstain" ? undefined : q.turn);
+				rows.push({ q, a: ra, b: rb, ...(location ? { location } : {}) });
+			}
+		} finally {
+			bar.skipRest();
+			bar.close();
+		}
+		if (!rows.length) return;
+		const withState = recallTotals(rows.map((r) => r.a));
+		const withoutState = recallTotals(rows.map((r) => r.b));
+		pi.appendEntry<RecallEntryData>(RECALL_ENTRY, {
+			version: 2,
+			at: new Date().toISOString(),
+			items: rows.length,
+			turns: rows.map((r) => r.q.turn).filter((n): n is number => typeof n === "number"),
+			withState,
+			withoutState,
+			modelCalls: counter.calls,
+			fold: opts.fold,
+			tools: opts.tools,
+			questions: path,
+		});
+		const short = `recall question set (${rows.length} questions${opts.tools ? ", with lookup tools" : ""}): ${questionSummaryLine(rows)} · ${counter.calls} model calls`;
+		const text = `${questionReport(rows, {
+			file: path,
+			fold: opts.fold,
+			tools: opts.tools,
+			modelCalls: counter.calls,
+			skipped,
+		}).join("\n")}\n`;
+		await writeReport(ctx, reportPath, text, "protokoll-recall-questions", short);
 	}
 
 	const SUB = [
@@ -2082,7 +2454,7 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	pi.registerCommand("protokoll", {
 		description:
-			"Session protocol: status | show | export [file] | stats [--file <path>] | recall [n] [--tools] [--fold] [--seed N] [--file <path>] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
+			"Session protocol: status | show | export [file] | stats [--file <path>] | recall [n] [--tools] [--fold] [--seed N] [--file <path>] | recall --make-questions [N] [--abstain K] [--update K] [--file <path>] | recall --questions <file> [--no-tools] [--fold] [--file <path>] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
 		getArgumentCompletions: (prefix) =>
 			SUB.filter((s) => s.startsWith(prefix.trim())).map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
@@ -2353,8 +2725,33 @@ export default function protokoll(pi: ExtensionAPI) {
 						const i = rest.indexOf(`--${name}`);
 						return i >= 0 ? rest[i + 1] : undefined;
 					};
-					// the count is the first plain number that is not the value of --seed or --file
-					const values = new Set(["--seed", "--file"].map((f) => rest.indexOf(f) + 1).filter((i) => i > 0));
+					const valueFlags = ["--seed", "--file", "--questions", "--abstain", "--update", "--make-questions"];
+					const values = new Set(valueFlags.map((f) => rest.indexOf(f) + 1).filter((i) => i > 0));
+					const num = (name: string): number | undefined => {
+						const v = Number.parseInt(of(name) ?? "", 10);
+						return Number.isFinite(v) && v >= 0 ? v : undefined;
+					};
+					if (rest.includes("--make-questions")) {
+						// --make-questions N: N fact questions, a fifth of that each for abstain and update
+						const fact = Math.min(num("make-questions") ?? 40, MAX_GENERATED_QUESTIONS);
+						const fifth = Math.max(fact >= 3 ? 1 : 0, Math.round(fact / 5));
+						await runMakeQuestions(
+							{ fact, abstain: num("abstain") ?? fifth, update: num("update") ?? fifth },
+							{ seed: num("seed") ?? 0, file: of("file") ?? "" },
+							ctx,
+						);
+						return;
+					}
+					const set = of("questions");
+					if (set) {
+						await runQuestionSet(
+							set,
+							{ fold: rest.includes("--fold"), tools: !rest.includes("--no-tools"), file: of("file") ?? "" },
+							ctx,
+						);
+						return;
+					}
+					// the count is the first plain number that is not the value of a flag
 					const n = Number.parseInt(rest.find((arg, i) => !values.has(i) && /^\d+$/.test(arg)) ?? "", 10);
 					if (Number.isFinite(n) && n > RECALL_MAX_ITEMS)
 						ctx.ui.notify(`protokoll recall: at most ${RECALL_MAX_ITEMS} items per run`, "warning");
@@ -2364,7 +2761,7 @@ export default function protokoll(pi: ExtensionAPI) {
 						{
 							fold: rest.includes("--fold"),
 							tools: rest.includes("--tools"),
-							seed: Number.parseInt(of("seed") ?? "0", 10) || 0,
+							seed: num("seed") ?? 0,
 							file: of("file") ?? "",
 						},
 						ctx,

@@ -2776,6 +2776,8 @@ export interface RecallEntryData {
 	tools?: boolean;
 	/** version 1 only: the similarity from which an answer counted as a hit */
 	threshold?: number;
+	/** set when the run asked a question file (`--questions`) instead of quoting user messages */
+	questions?: string;
 }
 
 /** Totals of a version-1 entry, still found in older sessions. */
@@ -2842,9 +2844,9 @@ export function recallCandidates(
  * `n` items spread over the candidates in equal steps. Deterministic, so the same session and the
  * same arguments give the same questions again; `seed` rotates the list first.
  */
-export function recallPick(candidates: Turn[], n: number, seed = 0): Turn[] {
+export function recallPick(candidates: Turn[], n: number, seed = 0, max = RECALL_MAX_ITEMS): Turn[] {
 	const wanted = Number.isFinite(n) && n > 0 ? Math.trunc(n) : RECALL_DEFAULT_ITEMS;
-	const count = Math.min(wanted, RECALL_MAX_ITEMS, candidates.length);
+	const count = Math.min(wanted, max, candidates.length);
 	if (count <= 0) return [];
 	if (candidates.length <= count) return [...candidates];
 	const offset = Number.isFinite(seed) ? Math.abs(Math.trunc(seed)) % candidates.length : 0;

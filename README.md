@@ -163,6 +163,8 @@ otherwise the extension loads twice. Your `protokoll.json` and all session data 
 | `/protokoll off --strip` | hard off: the section leaves the system prompt and the protocol tools are unregistered, so the next request reads the whole context again (once). Needs no withdrawal message |
 | `/protokoll reload` | reread `protokoll.json` |
 | `/protokoll rebuild` | rebuild the state of work from all protocols at the next compaction instead of updating it (against drift; takes longer) |
+| `/protokoll recall --make-questions [N] [--abstain K] [--update K] [--seed N] [--file <path>]` | lets the model write a question set from this session and saves it as Markdown to curate (default `protokoll-questions.md`): N fact questions (default 40) about turns that left the context, asked the way the user would ask, with a reference answer – questions that give their answer away (a number or identifier of the answer in the question) are dropped; K abstain questions (default N/5) about things right next to the session's topics that were never discussed – the right answer is "not in this session", and each carries the closest keyword-search hit for the curator; K update questions (default N/5) about something that changed during the session (a revoked or restated rule, a result that replaced an earlier one, confirmed by the model) – only the newer state is right. Nothing in the session changes |
+| `/protokoll recall --questions <file> [--no-tools] [--fold] [--file <path>]` | asks a (curated, frozen) question set against A and B – with the lookup tools unless `--no-tools` – and lets a judge rate every answer by kind. The report (default `<file>.results.md`) gives the correct rate per kind with its 95 % Wilson interval, the paired McNemar test between A and B, all verdicts, and with tools how many correct and wrong answers came with or without a lookup (wrong without looking up = made up); it also says where the asked turns were at run time (index/state of work, detail tier, still verbatim) |
 | `/protokoll repair` | bring an older session up to date: turns without protocol get one from their transcript, protocols without `index`/`tags` get both (8 turns per request), then compacts with a rebuild. Never replaces what the model wrote itself; running it again continues where it stopped |
 
 The stats table separates the two "after compaction" numbers that are often mixed up: `summary` is
@@ -176,6 +178,14 @@ per answer, plus up to six lookup rounds per answer with `--tools`. It uses the 
 unless `--fold` asks for a fresh fold, and writes one `protokoll-recall` entry so later runs are comparable –
 nothing else in the session changes. The same arguments pick the same turns again (`--seed` rotates
 the list first).
+
+Plain `recall` quotes the user's own message, so it measures whether the model finds a turn again.
+A question set measures what it knows: the questions stay the same from version to version, so the
+numbers become comparable, and their size decides how much they can say – with 10 questions and 8
+correct the 95 % interval still runs from 49 % to 94 %; about 250 questions per condition narrow it
+to ±5 points around 80 %. `recall --questions` has no item limit for that reason. The intervals hold
+for the question set and the session they come from; a judge that is systematically too strict or
+too lenient is not covered by them, so read a sample of the verdicts yourself.
 
 The German command names of earlier versions (`zeigen`, `anheften`, `lösen`, `an`, `aus`,
 `neu-laden`, `stand-neu`, `heilen`) still work.

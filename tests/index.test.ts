@@ -1307,6 +1307,105 @@ describe("protokoll extension", () => {
 		expect(h.notes.some((n) => n.includes("at most 20 items per run"))).toBe(true);
 	});
 
+	it("writes a question set with --make-questions and asks it with --questions", async () => {
+		h = harness([], { detailMaxTokens: 20, keepRecentTurns: 1, consolidate: false });
+		await h.fire("session_start", { reason: "startup" });
+		await h.turn(
+			"question 1: shall we push the branches?",
+			"a1\n<protocol>result: branches pushed\nrule: always push to the fork</protocol>",
+		);
+		for (let i = 2; i <= 5; i++)
+			await h.turn(
+				`question ${i}: why does the sensor drift?`,
+				`a${i}\n<protocol>result: sensor ${i} calibrated to 0.4 ms</protocol>`,
+			);
+		await h.turn(
+			"question 6: stop pushing please, ok?",
+			"a6\n<protocol>result: done\nrevoke: always push to the fork</protocol>",
+		);
+		await h.turn("question 7: and what about the docs?", "a7\n<protocol>result: docs updated</protocol>");
+		h.answers.push(
+			// fact: a good one, NONE, one that gives the answer away, another good one
+			"QUESTION: Worauf wurde der Sensor kalibriert?\nANSWER: Auf 0.4 ms.",
+			"NONE",
+			"QUESTION: Ist 0.4 ms richtig?\nANSWER: Ja, 0.4 ms.",
+			"QUESTION: Was kam bei der Kalibrierung heraus?\nANSWER: Der Sensor ist auf 0.4 ms kalibriert.",
+			// abstain: two offered, one wanted
+			"QUESTION: Welche Abtastrate hatten wir für den Sensor gewählt?\nQUESTION: Welche Farbe hat das Logo?",
+			// update
+			"QUESTION: Pushen wir noch zum Fork?\nANSWER: Nein, die Regel ist aufgehoben.\nOUTDATED: Immer zum Fork pushen.",
+		);
+		const file = join(h.ctx.cwd, "questions.md");
+		const before = h.requests.length;
+		const branchBefore = h.branch.length;
+		await h.commands
+			.get("protokoll")
+			.handler(`recall --make-questions 2 --abstain 1 --update 1 --file ${file}`, h.ctx);
+		expect(h.requests.length - before).toBe(6);
+		// generating changes nothing in the session
+		expect(h.branch.length).toBe(branchBefore);
+		expect(h.notes.at(-1)).toContain(`4 questions written to ${file}`);
+		const set = readFileSync(file, "utf8");
+		expect(set).toMatch(/## Q1 · fact · turn \d+/);
+		expect(set).toContain("## Q3 · abstain");
+		expect(set).toContain("Check: ");
+		expect(set).toContain("## Q4 · update · turn 1 → 6");
+		expect(set).not.toContain("Ist 0.4 ms richtig?");
+		expect(set).not.toContain("Logo");
+
+		// asked without tools: per question A, B and two judge calls
+		h.answers.push(
+			"0.4 ms",
+			"weiß nicht",
+			"CORRECT",
+			"UNKNOWN",
+			"0.4 ms",
+			"0.4 ms",
+			"CORRECT",
+			"CORRECT",
+			"Das waren 48 kHz.",
+			"Das wurde nicht besprochen.",
+			"WRONG",
+			"CORRECT",
+			"Nein.",
+			"Ja, immer zum Fork.",
+			"CORRECT",
+			"WRONG",
+		);
+		const asked = h.requests.length;
+		await h.commands.get("protokoll").handler(`recall --questions ${file} --no-tools`, h.ctx);
+		const mine = h.requests.slice(asked);
+		expect(mine).toHaveLength(16);
+		expect(mine[0].context.tools).toBeUndefined();
+		expect(mine[0].context.messages[0].content).toContain("Worauf wurde der Sensor kalibriert?");
+		expect(mine[0].context.messages[0].content).toContain("Answer in two or three sentences.");
+		// the fact judge sees the reference and the record of the turn, the abstain judge knows it was never discussed
+		expect(mine[2].context.messages[0].content).toContain("What was recorded for that turn: Result: sensor");
+		expect(mine[10].context.messages[0].content).toContain("The session never discussed this question.");
+		expect(mine[14].context.messages[0].content).toContain("Outdated state: Immer zum Fork pushen.");
+
+		const stored = h.branch.filter((e) => e.customType === "protokoll-recall").at(-1)?.data as any;
+		expect(stored.questions).toBe(file);
+		expect(stored.items).toBe(4);
+		expect(stored.withState.correct).toBe(3);
+		expect(stored.withoutState.correct).toBe(2);
+		const report = readFileSync(file.replace(/\.md$/, ".results.md"), "utf8");
+		expect(report).toContain("| all | 4 | 3/4 = 75 %");
+		expect(report).toContain("only A correct 2, only B correct 1, p = 1.000");
+		expect(report).toContain("### Q3 · abstain — A: wrong · B: correct");
+		expect(h.notes.at(-1)).toContain("McNemar p = 1.000");
+	});
+
+	it("refuses an unreadable or empty question set", async () => {
+		await h.commands.get("protokoll").handler(`recall --questions ${join(h.ctx.cwd, "nope.md")}`, h.ctx);
+		expect(h.notes.at(-1)).toContain("cannot read");
+		const empty = join(h.ctx.cwd, "empty.md");
+		writeFileSync(empty, "# nothing\n\n## Q1 · opinion\nQuestion: ?\n");
+		await h.commands.get("protokoll").handler(`recall --questions ${empty}`, h.ctx);
+		expect(h.notes.at(-1)).toContain("no usable question");
+		expect(h.notes.at(-1)).toContain("fact|abstain|update");
+	});
+
 	it("refuses to recall while the agent is still working", async () => {
 		await h.turn("q", "a\n<protocol>result: r</protocol>");
 		h.ctx.isIdle = () => false;

@@ -165,6 +165,8 @@ löschen, sonst lädt die Erweiterung doppelt. `protokoll.json` und alle Sitzung
 | `/protokoll off --strip` | hartes Aus: Der Abschnitt verlässt den Systemprompt und die Protokollwerkzeuge werden abgemeldet – die nächste Anfrage verarbeitet den ganzen Kontext neu (einmalig). Eine Zurücknahme ist nicht nötig |
 | `/protokoll reload` | `protokoll.json` neu einlesen |
 | `/protokoll rebuild` | beim nächsten Compacting den Stand aus allen Protokollen neu aufbauen statt fortschreiben |
+| `/protokoll recall --make-questions [N] [--abstain K] [--update K] [--seed N] [--file <pfad>]` | lässt das Modell aus dieser Sitzung einen Fragensatz schreiben und speichert ihn als Markdown zum Kuratieren (Standard `protokoll-questions.md`): N Faktenfragen (Standard 40) zu Zügen, die den Kontext verlassen haben, so gestellt, wie der Nutzer fragen würde, mit Musterantwort – Fragen, die ihre Antwort verraten (eine Zahl oder ein Bezeichner der Antwort steht in der Frage), werden verworfen; K abstain-Fragen (Standard N/5) zu Dingen direkt neben den Themen der Sitzung, die nie besprochen wurden – richtig ist „nicht in dieser Sitzung“, jede trägt den nächsten Treffer der Stichwortsuche für die Kuratierung; K update-Fragen (Standard N/5) zu etwas, das sich in der Sitzung geändert hat (aufgehobene oder neu gefasste Regel, ein Ergebnis, das ein früheres ersetzt hat, vom Modell bestätigt) – nur der neuere Stand ist richtig. An der Sitzung ändert sich nichts |
+| `/protokoll recall --questions <datei> [--no-tools] [--fold] [--file <pfad>]` | stellt einen (kuratierten, eingefrorenen) Fragensatz gegen A und B – mit den Nachschlagewerkzeugen, außer `--no-tools` – und lässt jede Antwort je nach Fragetyp bewerten. Der Bericht (Standard `<datei>.results.md`) nennt die Trefferquote je Typ mit 95-%-Wilson-Intervall, den gepaarten McNemar-Test zwischen A und B, alle Urteile und mit Werkzeugen, wie viele richtige und falsche Antworten mit oder ohne Nachschlagen kamen (falsch ohne Nachschlagen = erfunden); außerdem, wo die gefragten Züge zur Laufzeit standen (Index/Stand der Arbeit, Detailteil, noch wörtlich) |
 | `/protokoll repair` | ältere Sitzung auf den aktuellen Stand bringen: fehlende Protokolle aus dem Transkript, fehlende `index`/`tags` nachtragen (8 Züge pro Anfrage), danach Compacting mit Neuaufbau. Ersetzt nie, was das Modell selbst geschrieben hat; ein erneuter Aufruf setzt fort |
 
 Die Statistik unterscheidet die zwei „nach dem Compacting“-Zahlen, die oft verwechselt werden:
@@ -178,7 +180,15 @@ Bewertungsanfrage pro Antwort und mit `--tools` bis zu sechs Nachschlagerunden p
 wird der gespeicherte Stand der Arbeit, außer `--fold` lässt ihn neu falten, und die Sitzung bekommt
 genau einen `protokoll-recall`-Eintrag, damit spätere Läufe
 vergleichbar sind – sonst ändert sich nichts. Dieselben Argumente wählen dieselben Züge (`--seed`
-dreht die Liste vorher). 
+dreht die Liste vorher).
+
+Das einfache `recall` zitiert die Nachricht des Nutzers und misst damit, ob das Modell einen Zug
+wiederfindet. Ein Fragensatz misst, was es weiß: Die Fragen bleiben von Version zu Version gleich,
+dadurch werden die Zahlen vergleichbar, und ihre Anzahl bestimmt, wie viel sie aussagen – bei 10
+Fragen und 8 richtigen reicht das 95-%-Intervall noch von 49 % bis 94 %; etwa 250 Fragen pro
+Bedingung engen es auf ±5 Punkte um 80 % ein. Deshalb hat `recall --questions` keine Obergrenze. Die
+Intervalle gelten für den Fragensatz und die Sitzung, aus der er stammt; ein Judge, der systematisch
+zu streng oder zu milde urteilt, ist darin nicht erfasst – eine Stichprobe der Urteile selbst lesen.
 
 Die deutschen Befehlsnamen früherer Versionen (`zeigen`, `anheften`, `lösen`, `an`, `aus`,
 `neu-laden`, `stand-neu`, `heilen`) funktionieren weiter.
