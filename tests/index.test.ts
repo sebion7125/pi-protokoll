@@ -1646,15 +1646,15 @@ describe("outputPath", () => {
 });
 
 describe("tailText", () => {
-	it("shows the end of the live text as rolling lines of fixed width", () => {
-		expect(tailText("", 3)).toEqual([]);
-		expect(tailText("short answer", 3)).toEqual(["short answer"]);
-		const long = "x".repeat(250);
-		const lines = tailText(long, 2);
-		expect(lines).toHaveLength(2);
-		expect(lines.every((l) => l.length === 100)).toBe(true);
+	it("keeps the end of the live text as one line and lets the terminal wrap it", () => {
+		expect(tailText("", 240)).toBe("");
+		expect(tailText("short answer", 240)).toBe("short answer");
+		const shown = tailText(`${"a".repeat(300)}END`, 240);
+		expect(shown).toHaveLength(240);
+		expect(shown.startsWith("…")).toBe(true);
+		expect(shown.endsWith("END")).toBe(true);
 		// whitespace is folded, so line breaks in the model's text do not waste rows
-		expect(tailText("a\n\n  b\tc", 3)).toEqual(["a b c"]);
+		expect(tailText("a\n\n  b\tc", 240)).toBe("a b c");
 	});
 });
 
@@ -1662,7 +1662,7 @@ describe("Progress with live text", () => {
 	it("shows the latest model text under the running step and nothing once it is done", () => {
 		const widgets: (string[] | undefined)[] = [];
 		const ctx = { hasUI: true, ui: { setWidget: (_k: string, l: string[] | undefined) => widgets.push(l) } } as any;
-		const bar = new Progress(ctx, "protokoll recall", undefined, 3);
+		const bar = new Progress(ctx, "protokoll recall", undefined, 240);
 		const step = bar.add("turn 18 · A (with state of work)");
 		bar.start(step);
 		bar.update(step, 30, false, "The upstream merge needs twelve decisions.");
@@ -1670,7 +1670,7 @@ describe("Progress with live text", () => {
 		expect(shown.some((l) => l.startsWith("    │ ") && l.includes("twelve decisions"))).toBe(true);
 		bar.finish(step, true);
 		expect(bar.lines().some((l) => l.startsWith("    │ "))).toBe(false);
-		// without tailLines nothing extra is shown (the compaction widget stays as it was)
+		// without tailChars nothing extra is shown (the compaction widget stays as it was)
 		const plain = new Progress(ctx, "protokoll");
 		const s2 = plain.add("fold");
 		plain.start(s2);

@@ -171,24 +171,19 @@ interface Step {
 	/** Characters received so far (thinking and text). */
 	chars: number;
 	thinking: boolean;
-	/** the end of what the model sent so far, for progress bars that show it (see Progress tailLines) */
+	/** the end of what the model sent so far, for progress bars that show it (see Progress tailChars) */
 	tail?: string;
 }
 
-/** Characters per line of the live text under a running step. */
-const TAIL_WIDTH = 100;
-
 /**
- * The last `lines` lines of live model text, whitespace folded so the text rolls as one stream,
- * cut into lines of TAIL_WIDTH characters.
+ * The last `chars` characters of live model text, whitespace folded so the text rolls as one
+ * stream. It is one widget line: Pi's Text component wraps it to the terminal width, and Pi's
+ * limit of 10 widget lines counts it once.
  */
-export function tailText(text: string, lines: number): string[] {
+export function tailText(text: string, chars: number): string {
 	const flat = text.replace(/\s+/g, " ").trim();
-	if (!flat || lines <= 0) return [];
-	const out: string[] = [];
-	for (let end = flat.length; end > 0 && out.length < lines; end -= TAIL_WIDTH)
-		out.unshift(flat.slice(Math.max(0, end - TAIL_WIDTH), end));
-	return out;
+	if (!flat || chars <= 0) return "";
+	return flat.length > chars ? `…${flat.slice(flat.length - chars + 1)}` : flat;
 }
 
 /**
@@ -204,14 +199,14 @@ export class Progress {
 	/** live line for other extensions (pi-webapp shows it in the browser); nothing is persisted */
 	private readonly report?: (line: ProgressStep) => void;
 	private closed = false;
-	/** lines of live model text shown under the running step (0 = none) */
-	private readonly tailLines: number;
+	/** characters of live model text shown under the running step (0 = none) */
+	private readonly tailChars: number;
 	private lastTailRender = 0;
-	constructor(ctx: ExtensionContext, title: string, report?: (line: ProgressStep) => void, tailLines = 0) {
+	constructor(ctx: ExtensionContext, title: string, report?: (line: ProgressStep) => void, tailChars = 0) {
 		this.ctx = ctx;
 		this.title = title;
 		this.report = report;
-		this.tailLines = tailLines;
+		this.tailChars = tailChars;
 	}
 
 	private get visible(): boolean {
@@ -243,10 +238,10 @@ export class Progress {
 
 	update(step: Step, chars: number, thinking: boolean, delta?: string): void {
 		let changed = Math.floor(chars / 200) !== Math.floor(step.chars / 200) || thinking !== step.thinking;
-		if (this.tailLines > 0 && delta) {
+		if (this.tailChars > 0 && delta) {
 			// a switch between thinking and text starts the visible text afresh
 			const base = thinking !== step.thinking ? "" : (step.tail ?? "");
-			step.tail = (base + delta).slice(-TAIL_WIDTH * this.tailLines * 2);
+			step.tail = (base + delta).slice(-this.tailChars * 2);
 			// at most four repaints a second for the rolling text
 			const now = Date.now();
 			if (now - this.lastTailRender >= 250) {
@@ -313,8 +308,8 @@ export class Progress {
 		];
 		// Pi shows at most 10 widget lines: long runs show the steps around the current one
 		const running = this.steps.find((s) => s.state === "run");
-		const tail = this.tailLines > 0 && running ? tailText(running.tail ?? "", this.tailLines) : [];
-		const room = MAX_WIDGET_LINES - 1 - tail.length;
+		const tail = this.tailChars > 0 && running ? tailText(running.tail ?? "", this.tailChars) : "";
+		const room = MAX_WIDGET_LINES - 1 - (tail ? 1 : 0);
 		let shown = this.steps;
 		let before: Step[] = [];
 		let after: Step[] = [];
@@ -339,7 +334,7 @@ export class Progress {
 						? "reading context"
 						: `${s.thinking ? "thinking" : "writing"} ≈ ${Math.round(s.chars / 3.5)} tokens`;
 				out.push(`  ▸ ${s.label} · ${phase} · ${secs(s.started ?? now, now)}`);
-				if (s === running) for (const t of tail) out.push(`    │ ${t}`);
+				if (s === running && tail) out.push(`    │ ${tail}`);
 			} else {
 				const mark = s.state === "ok" ? "✓" : "✗";
 				out.push(`  ${mark} ${s.label}${s.note ? ` – ${s.note}` : ""} · ${secs(s.started ?? now, s.ended ?? now)}`);
@@ -1889,7 +1884,7 @@ export default function protokoll(pi: ExtensionAPI) {
 		let calls = 0;
 		/** One answer: without tools a single request, with tools a small loop that runs the lookups. */
 		// one step per answer and per judge call; the running one shows the model's text as it arrives
-		const bar = new Progress(ctx, "protokoll recall", undefined, 3);
+		const bar = new Progress(ctx, "protokoll recall", undefined, 240);
 		const stepsOf = new Map<RecallItem, { a: Step; b: Step; judge: Step }>();
 		for (const item of items)
 			stepsOf.set(item, {
