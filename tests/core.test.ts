@@ -1455,6 +1455,7 @@ describe("recall: what the summary still holds of old turns", () => {
 		expect(q).toContain("Earlier in this session I asked:");
 		expect(q).toContain("why does sensor 4 drift");
 		expect(q).toContain("What was the result or decision?");
+		expect(q).toContain("Answer in two or three sentences.");
 		expect(q).not.toContain("calibrated");
 		const long = recallQuestion("drift ".repeat(1000));
 		expect(long.length).toBeLessThan(RECALL_QUESTION_CHARS + 140);

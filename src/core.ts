@@ -2765,11 +2765,13 @@ export function recallPick(candidates: Turn[], n: number, seed = 0): Turn[] {
 
 /**
  * The question is built from the user's own words only – never from the protocol, and without the
- * turn number, so it cannot hand the answer to the model or point it at the lookup tools.
+ * turn number, so it cannot hand the answer to the model or point it at the lookup tools. It asks
+ * for a short answer: long ones run out of the answer budget mid-sentence, and the judge only needs
+ * the core.
  */
 export function recallQuestion(userText: string): string {
 	const quoted = clip(userText.trim(), RECALL_QUESTION_CHARS, "shortened").replace(/\s+/g, " ").trim();
-	return `Earlier in this session I asked: «${quoted}». What was the result or decision?`;
+	return `Earlier in this session I asked: «${quoted}». What was the result or decision? Answer in two or three sentences.`;
 }
 
 /**
