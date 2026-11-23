@@ -19,7 +19,7 @@ import {
 	type ProtocolEntryData,
 	tok,
 } from "../src/core.ts";
-import protokoll, { forceThinkingLevel, outputPath, Progress } from "../src/index.ts";
+import protokoll, { forceThinkingLevel, outputPath, Progress, tailText } from "../src/index.ts";
 
 type Handler = (event: any, ctx: any) => any;
 
@@ -1642,5 +1642,41 @@ describe("outputPath", () => {
 		expect(outputPath("~", "/work")).toBe(homedir());
 		expect(outputPath("out/recall.md", "/work")).toBe(join("/work", "out/recall.md"));
 		expect(outputPath("/tmp/recall.md", "/work")).toBe("/tmp/recall.md");
+	});
+});
+
+describe("tailText", () => {
+	it("shows the end of the live text as rolling lines of fixed width", () => {
+		expect(tailText("", 3)).toEqual([]);
+		expect(tailText("short answer", 3)).toEqual(["short answer"]);
+		const long = "x".repeat(250);
+		const lines = tailText(long, 2);
+		expect(lines).toHaveLength(2);
+		expect(lines.every((l) => l.length === 100)).toBe(true);
+		// whitespace is folded, so line breaks in the model's text do not waste rows
+		expect(tailText("a\n\n  b\tc", 3)).toEqual(["a b c"]);
+	});
+});
+
+describe("Progress with live text", () => {
+	it("shows the latest model text under the running step and nothing once it is done", () => {
+		const widgets: (string[] | undefined)[] = [];
+		const ctx = { hasUI: true, ui: { setWidget: (_k: string, l: string[] | undefined) => widgets.push(l) } } as any;
+		const bar = new Progress(ctx, "protokoll recall", undefined, 3);
+		const step = bar.add("turn 18 · A (with state of work)");
+		bar.start(step);
+		bar.update(step, 30, false, "The upstream merge needs twelve decisions.");
+		const shown = bar.lines();
+		expect(shown.some((l) => l.startsWith("    │ ") && l.includes("twelve decisions"))).toBe(true);
+		bar.finish(step, true);
+		expect(bar.lines().some((l) => l.startsWith("    │ "))).toBe(false);
+		// without tailLines nothing extra is shown (the compaction widget stays as it was)
+		const plain = new Progress(ctx, "protokoll");
+		const s2 = plain.add("fold");
+		plain.start(s2);
+		plain.update(s2, 30, false, "some text");
+		expect(plain.lines().some((l) => l.startsWith("    │ "))).toBe(false);
+		bar.close();
+		plain.close();
 	});
 });

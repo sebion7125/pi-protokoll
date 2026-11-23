@@ -171,6 +171,24 @@ interface Step {
 	/** Characters received so far (thinking and text). */
 	chars: number;
 	thinking: boolean;
+	/** the end of what the model sent so far, for progress bars that show it (see Progress tailLines) */
+	tail?: string;
+}
+
+/** Characters per line of the live text under a running step. */
+const TAIL_WIDTH = 100;
+
+/**
+ * The last `lines` lines of live model text, whitespace folded so the text rolls as one stream,
+ * cut into lines of TAIL_WIDTH characters.
+ */
+export function tailText(text: string, lines: number): string[] {
+	const flat = text.replace(/\s+/g, " ").trim();
+	if (!flat || lines <= 0) return [];
+	const out: string[] = [];
+	for (let end = flat.length; end > 0 && out.length < lines; end -= TAIL_WIDTH)
+		out.unshift(flat.slice(Math.max(0, end - TAIL_WIDTH), end));
+	return out;
 }
 
 /**
@@ -186,10 +204,14 @@ export class Progress {
 	/** live line for other extensions (pi-webapp shows it in the browser); nothing is persisted */
 	private readonly report?: (line: ProgressStep) => void;
 	private closed = false;
-	constructor(ctx: ExtensionContext, title: string, report?: (line: ProgressStep) => void) {
+	/** lines of live model text shown under the running step (0 = none) */
+	private readonly tailLines: number;
+	private lastTailRender = 0;
+	constructor(ctx: ExtensionContext, title: string, report?: (line: ProgressStep) => void, tailLines = 0) {
 		this.ctx = ctx;
 		this.title = title;
 		this.report = report;
+		this.tailLines = tailLines;
 	}
 
 	private get visible(): boolean {
@@ -211,6 +233,7 @@ export class Progress {
 		step.state = "run";
 		step.started = Date.now();
 		step.chars = 0;
+		step.tail = "";
 		if (!this.timer && (this.visible || this.report)) {
 			this.timer = setInterval(() => this.render(), 1000);
 			this.timer.unref?.();
@@ -218,11 +241,29 @@ export class Progress {
 		this.render();
 	}
 
-	update(step: Step, chars: number, thinking: boolean): void {
-		const changed = Math.floor(chars / 200) !== Math.floor(step.chars / 200) || thinking !== step.thinking;
+	update(step: Step, chars: number, thinking: boolean, delta?: string): void {
+		let changed = Math.floor(chars / 200) !== Math.floor(step.chars / 200) || thinking !== step.thinking;
+		if (this.tailLines > 0 && delta) {
+			// a switch between thinking and text starts the visible text afresh
+			const base = thinking !== step.thinking ? "" : (step.tail ?? "");
+			step.tail = (base + delta).slice(-TAIL_WIDTH * this.tailLines * 2);
+			// at most four repaints a second for the rolling text
+			const now = Date.now();
+			if (now - this.lastTailRender >= 250) {
+				this.lastTailRender = now;
+				changed = true;
+			}
+		}
 		step.chars = chars;
 		step.thinking = thinking;
 		if (changed) this.render();
+	}
+
+	/** Changes the label of a step, e.g. to say which lookup a running answer just made. */
+	relabel(step: Step, label: string): void {
+		step.label = label;
+		step.tail = "";
+		this.render();
 	}
 
 	finish(step: Step, ok: boolean, note?: string): void {
@@ -271,7 +312,9 @@ export class Progress {
 			`${this.title} · step ${Math.min(done + 1, this.steps.length)}/${this.steps.length} · ${secs(this.began, now)}`,
 		];
 		// Pi shows at most 10 widget lines: long runs show the steps around the current one
-		const room = MAX_WIDGET_LINES - 1;
+		const running = this.steps.find((s) => s.state === "run");
+		const tail = this.tailLines > 0 && running ? tailText(running.tail ?? "", this.tailLines) : [];
+		const room = MAX_WIDGET_LINES - 1 - tail.length;
 		let shown = this.steps;
 		let before: Step[] = [];
 		let after: Step[] = [];
@@ -296,6 +339,7 @@ export class Progress {
 						? "reading context"
 						: `${s.thinking ? "thinking" : "writing"} ≈ ${Math.round(s.chars / 3.5)} tokens`;
 				out.push(`  ▸ ${s.label} · ${phase} · ${secs(s.started ?? now, now)}`);
+				if (s === running) for (const t of tail) out.push(`    │ ${t}`);
 			} else {
 				const mark = s.state === "ok" ? "✓" : "✗";
 				out.push(`  ${mark} ${s.label}${s.note ? ` – ${s.note}` : ""} · ${secs(s.started ?? now, s.ended ?? now)}`);
@@ -451,7 +495,7 @@ async function callModel(
 			for await (const ev of stream as unknown as AsyncIterable<{ type: string; delta?: string }>) {
 				if (typeof ev.delta === "string" && ev.type.endsWith("_delta")) {
 					chars += ev.delta.length;
-					progress.bar.update(progress.step, chars, ev.type === "thinking_delta");
+					progress.bar.update(progress.step, chars, ev.type === "thinking_delta", ev.delta);
 				}
 			}
 		}
@@ -1844,10 +1888,23 @@ export default function protokoll(pi: ExtensionAPI) {
 			: undefined;
 		let calls = 0;
 		/** One answer: without tools a single request, with tools a small loop that runs the lookups. */
-		const answer = async (prompt: string): Promise<{ text?: string; toolCalls: number }> => {
+		// one step per answer and per judge call; the running one shows the model's text as it arrives
+		const bar = new Progress(ctx, "protokoll recall", undefined, 3);
+		const stepsOf = new Map<RecallItem, { a: Step; b: Step; judge: Step }>();
+		for (const item of items)
+			stepsOf.set(item, {
+				a: bar.add(`turn ${item.turn} · A (with state of work)`),
+				b: bar.add(`turn ${item.turn} · B (without)`),
+				judge: bar.add(`turn ${item.turn} · judge`),
+			});
+		const answer = async (prompt: string, step: Step): Promise<{ text?: string; toolCalls: number }> => {
+			const base = step.label;
+			bar.start(step);
 			if (!tools) {
 				calls++;
-				return { text: await ask(ctx, prompt, RECALL_ANSWER_TOKENS, signal, undefined, "off"), toolCalls: 0 };
+				const text = await ask(ctx, prompt, RECALL_ANSWER_TOKENS, signal, { bar, step }, "off");
+				bar.finish(step, text !== undefined);
+				return { text, toolCalls: 0 };
 			}
 			let messages: unknown[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
 			let toolCalls = 0;
@@ -1860,8 +1917,12 @@ export default function protokoll(pi: ExtensionAPI) {
 					// the last round has no tools: the model has to answer with what it found
 					last ? { messages } : { messages, tools },
 					{ maxTokens: RECALL_ANSWER_TOKENS, ...(signal ? { signal } : {}), ...reasoningOption("off") },
+					{ bar, step },
 				);
-				if (reply.error !== undefined) return { text: undefined, toolCalls };
+				if (reply.error !== undefined) {
+					bar.finish(step, false, reply.error);
+					return { text: undefined, toolCalls };
+				}
 				const blocks = (
 					(reply.message?.content as {
 						type?: string;
@@ -1870,8 +1931,18 @@ export default function protokoll(pi: ExtensionAPI) {
 						arguments?: Record<string, unknown>;
 					}[]) ?? []
 				).filter((c) => c?.type === "toolCall");
-				if (!reply.toolCall || !blocks.length || last) return { text: reply.text || undefined, toolCalls };
+				if (!reply.toolCall || !blocks.length || last) {
+					bar.finish(step, true, toolCalls ? `${toolCalls} lookups` : undefined);
+					return { text: reply.text || undefined, toolCalls };
+				}
 				toolCalls += blocks.length;
+				const what = blocks
+					.map((c) => {
+						const args = JSON.stringify(c.arguments ?? {});
+						return `${c.name ?? "?"}(${args.length > 60 ? `${args.slice(0, 59)}…` : args})`;
+					})
+					.join(", ");
+				bar.relabel(step, `${base} · lookup ${toolCalls}: ${what}`);
 				messages = [
 					...messages,
 					reply.message,
@@ -1895,6 +1966,7 @@ export default function protokoll(pi: ExtensionAPI) {
 					}),
 				];
 			}
+			bar.finish(step, false);
 			return { text: undefined, toolCalls };
 		};
 		const judge = async (item: RecallItem, text: string | undefined): Promise<RecallAnswer> => {
@@ -1914,19 +1986,27 @@ export default function protokoll(pi: ExtensionAPI) {
 		};
 
 		const rows: RecallTurnResult[] = [];
-		for (const item of items) {
-			if (stop()) break;
-			const ansA = await answer(`${textA}\n\n${item.question}`);
-			if (stop()) break;
-			const ansB = await answer(`${textB}\n\n${item.question}`);
-			if (stop()) break;
-			const ra = await judge(item, ansA.text);
-			const rb = await judge(item, ansB.text);
-			if (opts.tools) {
-				ra.toolCalls = ansA.toolCalls;
-				rb.toolCalls = ansB.toolCalls;
+		try {
+			for (const item of items) {
+				if (stop()) break;
+				const st = stepsOf.get(item) as { a: Step; b: Step; judge: Step };
+				const ansA = await answer(`${textA}\n\n${item.question}`, st.a);
+				if (stop()) break;
+				const ansB = await answer(`${textB}\n\n${item.question}`, st.b);
+				if (stop()) break;
+				bar.start(st.judge);
+				const ra = await judge(item, ansA.text);
+				const rb = await judge(item, ansB.text);
+				bar.finish(st.judge, true, `A ${ra.verdict} · B ${rb.verdict}`);
+				if (opts.tools) {
+					ra.toolCalls = ansA.toolCalls;
+					rb.toolCalls = ansB.toolCalls;
+				}
+				rows.push({ item, a: ra, b: rb });
 			}
-			rows.push({ item, a: ra, b: rb });
+		} finally {
+			bar.skipRest();
+			bar.close();
 		}
 		if (!rows.length) return;
 
