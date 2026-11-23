@@ -74,6 +74,7 @@ import {
 	LONG_CHAT_NOTE,
 	latestFoldState,
 	loadConfig,
+	lookupTable,
 	narrativeBudget,
 	PIN_ENTRY,
 	type PinEntryData,
@@ -2313,6 +2314,7 @@ export default function protokoll(pi: ExtensionAPI) {
 						].join("\n");
 					if (name) {
 						const file = outputPath(name, ctx.cwd);
+						const calls = lookupTable(stats.totals.lookups);
 						if (existsSync(file)) {
 							const ok = ctx.hasUI && (await ctx.ui.confirm("Overwrite file?", file));
 							if (!ok) {
@@ -2320,7 +2322,10 @@ export default function protokoll(pi: ExtensionAPI) {
 								return;
 							}
 						}
-						writeFileSync(file, `# protokoll stats\n\n${report(stats.rows)}\n`, "utf8");
+						const lookups = calls.length
+							? `\n## Lookups\n\nEvery call of protocol_search, protocol_read and protocol_turn the model made itself, with the turn it was made in.\n\n${calls.join("\n")}\n`
+							: "";
+						writeFileSync(file, `# protokoll stats\n\n${report(stats.rows)}\n${lookups}`, "utf8");
 						ctx.ui.notify(`protokoll: stats written: ${file}`, "info");
 						return;
 					}

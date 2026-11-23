@@ -2498,6 +2498,7 @@ export interface StatsTotals {
 	medians: StatsNumbers;
 	maxima: StatsNumbers;
 	usage: UsageStats;
+	lookups: LookupStats;
 }
 
 export interface SessionStats {
@@ -2577,8 +2578,96 @@ export function sessionStats(branch: PlainEntry[]): SessionStats {
 		medians,
 		maxima,
 		usage: collectUsageStats(branch),
+		lookups: collectLookupStats(branch),
 	};
 	return { rows, totals };
+}
+
+/** The tools of this extension that read earlier turns. */
+export const LOOKUP_TOOLS = ["protocol_search", "protocol_read", "protocol_turn"] as const;
+export type LookupToolName = (typeof LOOKUP_TOOLS)[number];
+
+export interface LookupCall {
+	/** the turn in which the model made the call */
+	turn: number;
+	tool: LookupToolName;
+	/** the arguments as the model wrote them, shortened */
+	args: string;
+	/** the tool answered with an error (e.g. a turn that does not exist) */
+	failed: boolean;
+}
+
+export interface LookupStats {
+	calls: LookupCall[];
+	byTool: Record<LookupToolName, number>;
+	failed: number;
+	/** turns in which at least one lookup happened */
+	turns: number[];
+}
+
+/**
+ * How often the model itself looked into earlier turns in this session: the calls of protocol_search,
+ * protocol_read and protocol_turn found in the answers, with the turn they were made in. A call
+ * counts as failed when its tool result is marked as an error.
+ */
+export function collectLookupStats(branch: PlainEntry[]): LookupStats {
+	const tools = new Set<string>(LOOKUP_TOOLS);
+	const calls: LookupCall[] = [];
+	for (const t of collectTurns(branch)) {
+		const byId = new Map<string, LookupCall>();
+		for (const e of t.entries) {
+			const m = e.message;
+			if (!m) continue;
+			if (m.role === "assistant" && Array.isArray(m.content)) {
+				for (const b of m.content as Record<string, unknown>[]) {
+					if (b?.type !== "toolCall" || !tools.has(String(b.name))) continue;
+					const raw = JSON.stringify(b.arguments ?? {});
+					const call: LookupCall = {
+						turn: t.number,
+						tool: b.name as LookupToolName,
+						args: raw.length > 120 ? `${raw.slice(0, 119)}…` : raw,
+						failed: false,
+					};
+					calls.push(call);
+					if (typeof b.id === "string") byId.set(b.id, call);
+				}
+			} else if (m.role === "toolResult" && (m as { isError?: boolean }).isError === true) {
+				const id = (m as { toolCallId?: unknown }).toolCallId;
+				const call = typeof id === "string" ? byId.get(id) : undefined;
+				if (call) call.failed = true;
+			}
+		}
+	}
+	const byTool = Object.fromEntries(LOOKUP_TOOLS.map((n) => [n, 0])) as Record<LookupToolName, number>;
+	for (const c of calls) byTool[c.tool]++;
+	return {
+		calls,
+		byTool,
+		failed: calls.filter((c) => c.failed).length,
+		turns: [...new Set(calls.map((c) => c.turn))],
+	};
+}
+
+/** Totals of the lookups, for the stats summary lines. */
+export function lookupLines(l: LookupStats): string[] {
+	if (!l.calls.length) return ["lookups: none – the model has not looked into earlier turns in this session"];
+	return [
+		`lookups: ${l.calls.length} in ${l.turns.length} turn${l.turns.length === 1 ? "" : "s"} ` +
+			`(${LOOKUP_TOOLS.map((n) => `${n} ${l.byTool[n]}`).join(", ")}; failed ${l.failed})`,
+	];
+}
+
+/** Every lookup as a Markdown table, for the stats file. */
+export function lookupTable(l: LookupStats): string[] {
+	if (!l.calls.length) return [];
+	return [
+		"| turn | tool | arguments | |",
+		"|---|---|---|---|",
+		...l.calls.map(
+			(c) =>
+				`| ${c.turn} | ${c.tool} | \`${c.args.replace(/\|/g, "\\|").replace(/`/g, "'")}\` | ${c.failed ? "failed" : ""} |`,
+		),
+	];
 }
 
 /** One line per column, so a quoted number always travels with its meaning. */
@@ -2634,6 +2723,7 @@ export function statsTotalsLines(stats: SessionStats): string[] {
 		pair("summary", t.medians.summary, t.maxima.summary),
 		time("took", t.medians.durationMs, t.maxima.durationMs),
 		...usageLines(t.usage),
+		...lookupLines(t.lookups),
 	];
 }
 
@@ -2656,6 +2746,7 @@ export function statsSummary(stats: SessionStats): string {
 	if (typeof t.medians.afterTotal === "number") parts.push(`after ${dash(t.medians.afterTotal)}`);
 	if (typeof t.medians.summary === "number") parts.push(`summary ${dash(t.medians.summary)}`);
 	parts.push(t.usage.requests ? `cache ${t.usage.cached}/${t.usage.requests}` : "no usage data");
+	parts.push(`${t.lookups.calls.length} lookups`);
 	return parts.join(" · ");
 }
 

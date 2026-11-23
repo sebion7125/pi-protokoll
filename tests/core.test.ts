@@ -13,6 +13,7 @@ import {
 	chooseCut,
 	cleanFileEntry,
 	clipMiddle,
+	collectLookupStats,
 	collectProtocols,
 	collectTurns,
 	collectUsageStats,
@@ -43,6 +44,8 @@ import {
 	isUserInput,
 	LONG_CHAT_NOTE,
 	loadConfig,
+	lookupLines,
+	lookupTable,
 	medianOf,
 	mergeConfig,
 	narrativeBudget,
@@ -1370,7 +1373,8 @@ describe("stats: numbers per compaction", () => {
 		expect(lines.some((l) => l.startsWith("compactions: 3 (protokoll 2, Pi 1; no room 1, failed 0)"))).toBe(true);
 		expect(lines.some((l) => l.includes("before: median 150,000, max 213,451"))).toBe(true);
 		// the branch has no usage data at all
-		expect(lines.at(-1)).toBe("prompt cache: no usage data in this session");
+		expect(lines.at(-2)).toBe("prompt cache: no usage data in this session");
+		expect(lines.at(-1)).toBe("lookups: none – the model has not looked into earlier turns in this session");
 		expect(STATS_LEGEND.some((l) => l.startsWith("after total = everything the model sees"))).toBe(true);
 	});
 
@@ -1396,6 +1400,53 @@ describe("stats: numbers per compaction", () => {
 		);
 		// a session written without usage fields reports that instead of zeros
 		expect(collectUsageStats([user("q"), assistant("a")])).toEqual({ requests: 0, cached: 0 });
+	});
+
+	it("counts the lookups the model made itself, per tool and per turn, and marks failed ones", () => {
+		const call = (callId: string, name: string, args: Record<string, unknown>): PlainEntry => ({
+			id: id(),
+			type: "message",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: callId, name, arguments: args }],
+			},
+		});
+		const result = (callId: string, isError: boolean): PlainEntry => ({
+			id: id(),
+			type: "message",
+			message: { role: "toolResult", toolCallId: callId, isError, content: [] } as unknown as PlainMessage,
+		});
+		const branch = [
+			user("first"),
+			call("x1", "bash", { command: "ls" }),
+			assistant("done"),
+			user("second"),
+			call("x2", "protocol_search", { query: "watchdog | timeout" }),
+			result("x2", false),
+			call("x3", "protocol_turn", { turn: 999 }),
+			result("x3", true),
+			assistant("found it"),
+			user("third"),
+			call("x4", "protocol_read", { turns: "1-2" }),
+			result("x4", false),
+		];
+		const l = collectLookupStats(branch);
+		expect(l.byTool).toEqual({ protocol_search: 1, protocol_read: 1, protocol_turn: 1 });
+		expect(l.turns).toEqual([2, 3]);
+		expect(l.failed).toBe(1);
+		expect(l.calls.map((c) => [c.turn, c.tool, c.failed])).toEqual([
+			[2, "protocol_search", false],
+			[2, "protocol_turn", true],
+			[3, "protocol_read", false],
+		]);
+		expect(lookupLines(l)).toEqual([
+			"lookups: 3 in 2 turns (protocol_search 1, protocol_read 1, protocol_turn 1; failed 1)",
+		]);
+		const table = lookupTable(l);
+		// a pipe inside the arguments must not break the Markdown row
+		expect(table[2]).toBe('| 2 | protocol_search | `{"query":"watchdog \\| timeout"}` |  |');
+		expect(table[3]).toContain("| failed |");
+		expect(sessionStats(branch).totals.lookups.calls).toHaveLength(3);
 	});
 });
 
