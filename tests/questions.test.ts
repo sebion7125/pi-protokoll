@@ -217,6 +217,12 @@ describe("the question file", () => {
 		const back = parseQuestionFile(text);
 		expect(back.errors).toEqual([]);
 		expect(back.questions).toEqual(questions);
+		expect(back.session).toBeUndefined();
+		const withSession = parseQuestionFile(
+			formatQuestionFile(questions, { at: "2026-11-27T10:00:00Z", turns: 3, session: "abc-123" }),
+		);
+		expect(withSession.session).toBe("abc-123");
+		expect(withSession.questions).toEqual(questions);
 	});
 
 	it("takes hand edits: deleted sections, wrapped lines, own questions; reports what it cannot use", () => {

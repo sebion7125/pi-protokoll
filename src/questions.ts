@@ -296,7 +296,10 @@ export function termOccurs(sessionText: string, term: string): boolean {
 
 // ------------------------------------------------------------------ the question file
 
-export function formatQuestionFile(questions: RecallQuestion[], meta: { at: string; turns: number }): string {
+export function formatQuestionFile(
+	questions: RecallQuestion[],
+	meta: { at: string; turns: number; session?: string },
+): string {
 	const out = [
 		"# protokoll recall questions",
 		"",
@@ -307,6 +310,7 @@ export function formatQuestionFile(questions: RecallQuestion[], meta: { at: stri
 		"turn N` (update: `turn N → M`, abstain: no turn). Run them with",
 		"`/protokoll recall --questions <this file>`.",
 		"",
+		...(meta.session ? [`Session: ${meta.session}`, ""] : []),
 	];
 	for (const q of questions) {
 		const where =
@@ -324,10 +328,17 @@ export function formatQuestionFile(questions: RecallQuestion[], meta: { at: stri
 }
 
 /** Reads a (possibly hand-edited) question file. Sections that cannot be used are reported, not guessed. */
-export function parseQuestionFile(text: string): { questions: RecallQuestion[]; errors: string[] } {
+export function parseQuestionFile(text: string): {
+	questions: RecallQuestion[];
+	errors: string[];
+	/** the session the set was generated from (`Session:` line before the first section) */
+	session?: string;
+} {
 	const questions: RecallQuestion[] = [];
 	const errors: string[] = [];
-	const sections = text.split(/^##[ \t]+/m).slice(1);
+	const [preamble = "", ...rest] = text.split(/^##[ \t]+/m);
+	const session = /^Session:\s*(\S+)/m.exec(preamble)?.[1];
+	const sections = rest;
 	for (const sec of sections) {
 		const [head = "", ...body] = sec.split("\n");
 		const parts = head.split(/\s+[·|]\s+/).map((p) => p.trim());
@@ -378,7 +389,7 @@ export function parseQuestionFile(text: string): { questions: RecallQuestion[]; 
 		if (ids.has(q.id)) errors.push(`${q.id}: used twice – the results would mix them up`);
 		ids.add(q.id);
 	}
-	return { questions, errors };
+	return { questions, errors, ...(session ? { session } : {}) };
 }
 
 // ------------------------------------------------------------------ asking and judging

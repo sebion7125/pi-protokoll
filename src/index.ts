@@ -2378,7 +2378,11 @@ export default function protokoll(pi: ExtensionAPI) {
 		}
 		writeFileSync(
 			target,
-			formatQuestionFile(questions, { at: new Date().toISOString(), turns: turns.length }),
+			formatQuestionFile(questions, {
+				at: new Date().toISOString(),
+				turns: turns.length,
+				session: ctx.sessionManager.getSessionId(),
+			}),
 			"utf8",
 		);
 		ctx.ui.notify(
@@ -2408,7 +2412,24 @@ export default function protokoll(pi: ExtensionAPI) {
 			ctx.ui.notify(`${label}: cannot read ${path} (${err instanceof Error ? err.message : String(err)})`, "error");
 			return;
 		}
-		const { questions, errors } = parseQuestionFile(raw);
+		const { questions, errors, session } = parseQuestionFile(raw);
+		// a set asked in another session measures nothing: its turns do not exist there or mean something else
+		const here = ctx.sessionManager.getSessionId();
+		if (session && session !== here) {
+			const ok =
+				ctx.hasUI &&
+				(await ctx.ui.confirm(
+					"Question set from another session",
+					`${path} was generated in session ${session}, this is ${here}. Ask it here anyway?`,
+				));
+			if (!ok) {
+				ctx.ui.notify(
+					`${label}: not asked – the set belongs to session ${session}, this is ${here}. Open that session (or the fork it was made in) and run it there.`,
+					"warning",
+				);
+				return;
+			}
+		}
 		if (!questions.length) {
 			ctx.ui.notify(
 				`${label}: no usable question in ${path}${errors.length ? `\n  ${errors.join("\n  ")}` : ""}`,

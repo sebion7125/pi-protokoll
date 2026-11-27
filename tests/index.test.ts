@@ -1353,6 +1353,8 @@ describe("protokoll extension", () => {
 		expect(h.notes.at(-1)).toContain(`4 questions written to ${file}`);
 		const set = readFileSync(file, "utf8");
 		expect(set).toMatch(/## Q1 · fact · turn \d+/);
+		// the set remembers its session
+		expect(set).toContain("Session: s1");
 		expect(set).toContain("## Q3 · abstain");
 		expect(set).toContain('Check: key term "samplerate_hz" occurs nowhere in the session text');
 		expect(set).toContain("## Q4 · update · turn 1 → 6");
@@ -1474,6 +1476,22 @@ describe("protokoll extension", () => {
 		expect(set).toContain("Answer: build/fixes.");
 		expect(set).toContain("Outdated: build/base.");
 		expect(h.notes.at(-1)).toContain("1 answers were revised by a later turn – 1 became update questions");
+	});
+
+	it("does not ask a question set from another session unless the user confirms", async () => {
+		await h.turn("q one with enough text", "a\n<protocol>result: r1</protocol>");
+		const file = join(h.ctx.cwd, "other.md");
+		writeFileSync(file, "# set\n\nSession: s-other\n\n## Q1 · fact · turn 1\n\nQuestion: was?\nAnswer: r1\n");
+		const before = h.requests.length;
+		await h.commands.get("protokoll").handler(`recall --questions ${file} --no-tools`, h.ctx);
+		expect(h.requests.length).toBe(before);
+		expect(h.notes.at(-1)).toContain("the set belongs to session s-other, this is s1");
+		// confirmed: asked anyway
+		h.ctx.hasUI = true;
+		h.ctx.ui.confirm = async () => true;
+		h.answers.push("r1", "r1", "CORRECT", "CORRECT");
+		await h.commands.get("protokoll").handler(`recall --questions ${file} --no-tools`, h.ctx);
+		expect(h.requests.length - before).toBe(4);
 	});
 
 	it("refuses an unreadable or empty question set", async () => {
