@@ -1533,6 +1533,8 @@ describe("recall: what the summary still holds of old turns", () => {
 		expect(recallJudgeVerdict("UNKNOWN.")).toBe("unknown");
 		expect(recallJudgeVerdict("I cannot rate this")).toBe("unscored");
 		expect(recallJudgeVerdict(undefined)).toBe("unscored");
+		// a judge that explains itself ends with the verdict: the last word counts
+		expect(recallJudgeVerdict("Not CORRECT – it names the outdated state. WRONG")).toBe("wrong");
 		// an empty answer is unknown, a tool call written as text (no tools declared) is a lookup
 		expect(recallPreVerdict(undefined, false)).toBe("unknown");
 		expect(recallPreVerdict("  ", true)).toBe("unknown");
@@ -1540,8 +1542,9 @@ describe("recall: what the summary still holds of old turns", () => {
 			"Let me search the protocol.  <tool_call> <function=protocol_search> <parameter=keywords> pipewire </parameter> </function> </tool_call>";
 		expect(recallWantsLookup(asText)).toBe(true);
 		expect(recallPreVerdict(asText, false)).toBe("lookup");
-		// with tools the loop ran the lookups; the final text goes to the judge
-		expect(recallPreVerdict(asText, true)).toBeUndefined();
+		// with tools the final round has none: a tool call written there means the model gave up
+		expect(recallPreVerdict(asText, true)).toBe("unknown");
+		expect(recallPreVerdict("<tool_call> <function=bash> <parameter=command> ls </parameter>", true)).toBe("unknown");
 		expect(recallPreVerdict("the sensor was calibrated to 0.4 ms", false)).toBeUndefined();
 		expect(recallWantsLookup("the sensor reads 0.4 ms now")).toBe(false);
 	});

@@ -1314,10 +1314,10 @@ describe("protokoll extension", () => {
 			"question 1: shall we push the branches?",
 			"a1\n<protocol>result: branches pushed\nrule: always push to the fork</protocol>",
 		);
-		for (let i = 2; i <= 5; i++)
+		for (const name of ["alpha", "beta", "gamma", "delta"])
 			await h.turn(
-				`question ${i}: why does the sensor drift?`,
-				`a${i}\n<protocol>result: sensor ${i} calibrated to 0.4 ms</protocol>`,
+				`question ${name}: why does the sensor drift?`,
+				`a ${name}\n<protocol>result: sensor ${name} calibrated against the reference probe</protocol>`,
 			);
 		await h.turn(
 			"question 6: stop pushing please, ok?",
@@ -1325,13 +1325,16 @@ describe("protokoll extension", () => {
 		);
 		await h.turn("question 7: and what about the docs?", "a7\n<protocol>result: docs updated</protocol>");
 		h.answers.push(
-			// fact: a good one, NONE, one that gives the answer away, another good one
+			// fact: a good one (checked against later turns: still current), NONE, one that gives the answer
+			// away (dropped before the check), another good one (checked: still current)
 			"QUESTION: Worauf wurde der Sensor kalibriert?\nANSWER: Auf 0.4 ms.",
+			"CURRENT",
 			"NONE",
 			"QUESTION: Ist 0.4 ms richtig?\nANSWER: Ja, 0.4 ms.",
 			"QUESTION: Was kam bei der Kalibrierung heraus?\nANSWER: Der Sensor ist auf 0.4 ms kalibriert.",
-			// abstain: two offered, one wanted
-			"QUESTION: Welche Abtastrate hatten wir für den Sensor gewählt?\nQUESTION: Welche Farbe hat das Logo?",
+			"CURRENT",
+			// abstain: the first key term never occurs in the session, the second one does
+			"QUESTION: Welches Logo hat die Firma?\nKEY: sensor\nQUESTION: Welche Abtastrate hatten wir für den Sensor gewählt?\nKEY: samplerate_hz",
 			// update
 			"QUESTION: Pushen wir noch zum Fork?\nANSWER: Nein, die Regel ist aufgehoben.\nOUTDATED: Immer zum Fork pushen.",
 		);
@@ -1341,14 +1344,17 @@ describe("protokoll extension", () => {
 		await h.commands
 			.get("protokoll")
 			.handler(`recall --make-questions 2 --abstain 1 --update 1 --file ${file}`, h.ctx);
-		expect(h.requests.length - before).toBe(6);
+		expect(h.requests.length - before).toBe(8);
+		const gen = h.requests.slice(before);
+		expect(gen[1].context.messages[0].content).toContain("Does a later turn replace, revoke or correct this answer");
+		expect(gen[1].context.messages[0].content).toContain("Later turns:");
 		// generating changes nothing in the session
 		expect(h.branch.length).toBe(branchBefore);
 		expect(h.notes.at(-1)).toContain(`4 questions written to ${file}`);
 		const set = readFileSync(file, "utf8");
 		expect(set).toMatch(/## Q1 · fact · turn \d+/);
 		expect(set).toContain("## Q3 · abstain");
-		expect(set).toContain("Check: ");
+		expect(set).toContain('Check: key term "samplerate_hz" occurs nowhere in the session text');
 		expect(set).toContain("## Q4 · update · turn 1 → 6");
 		expect(set).not.toContain("Ist 0.4 ms richtig?");
 		expect(set).not.toContain("Logo");
@@ -1394,6 +1400,80 @@ describe("protokoll extension", () => {
 		expect(report).toContain("only A correct 2, only B correct 1, p = 1.000");
 		expect(report).toContain("### Q3 · abstain — A: wrong · B: correct");
 		expect(h.notes.at(-1)).toContain("McNemar p = 1.000");
+		// the judge thinks before its verdict
+		expect(mine[2].options.maxTokens).toBe(1024);
+
+		// judged again against an edited file: unchanged questions reuse their answers, an edited one is asked
+		const results = file.replace(/\.md$/, ".results.md");
+		writeFileSync(file, set.replace("Pushen wir noch zum Fork?", "Pushen wir weiterhin zum Fork?"));
+		h.answers.push(
+			// Q1–Q3 reused: two judge calls per answer (--judge-twice)
+			"CORRECT",
+			"CORRECT",
+			"UNKNOWN",
+			"WRONG",
+			"CORRECT",
+			"CORRECT",
+			"CORRECT",
+			"CORRECT",
+			"WRONG",
+			"WRONG",
+			"CORRECT",
+			"CORRECT",
+			// Q4 asked again: A, B, then the judges
+			"Nein.",
+			"<tool_call> <function=protocol_search> <parameter=query> push </parameter> </function> </tool_call>",
+			"CORRECT",
+			"CORRECT",
+		);
+		const again = h.requests.length;
+		await h.commands
+			.get("protokoll")
+			.handler(
+				`recall --questions ${file} --no-tools --reuse ${results} --judge-twice --file ${join(h.ctx.cwd, "r2.md")}`,
+				h.ctx,
+			);
+		const second = h.requests.slice(again);
+		// 12 judge calls for the reused answers, 2 answers + 2 judge calls for Q4 (B wrote a tool call: no judge)
+		expect(second).toHaveLength(16);
+		expect(second[0].context.messages[0].content).toContain("Answer: 0.4 ms");
+		const r2 = readFileSync(join(h.ctx.cwd, "r2.md"), "utf8");
+		expect(r2).toContain("3 questions were not asked again");
+		expect(r2).toContain("Judge consistency: a second, independent judge request gave the same verdict for 6/7");
+		expect(r2).toContain("Second judge: A correct · B wrong");
+		expect(r2).toMatch(/### Q4 · update · turn 1 → 6 — A: correct · B: lookup/);
+	});
+
+	it("turns a fact that a later turn revised into an update question", async () => {
+		h = harness([], { detailMaxTokens: 20, keepRecentTurns: 1, consolidate: false });
+		await h.fire("session_start", { reason: "startup" });
+		await h.turn(
+			"question one: something else entirely, ok?",
+			"a\n<protocol>result: docs written for the parser</protocol>",
+		);
+		await h.turn("question two: and the tests, please?", "b\n<protocol>result: tests pass</protocol>");
+		await h.turn(
+			"question three: which baseline binary do we measure?",
+			"c\n<protocol>result: baseline binary is build/base</protocol>",
+		);
+		await h.turn(
+			"question four: where is the baseline binary now?",
+			"d\n<protocol>result: baseline binary moved to build/fixes</protocol>",
+		);
+		await h.turn("question five: last one for today", "e\n<protocol>result: done</protocol>");
+		h.answers.push(
+			"QUESTION: Welches Baseline-Binary messen wir?\nANSWER: build/base.",
+			"REVISED\nTURN: 4\nANSWER: build/fixes.",
+		);
+		const file = join(h.ctx.cwd, "q-rev.md");
+		await h.commands
+			.get("protokoll")
+			.handler(`recall --make-questions 1 --abstain 0 --update 1 --file ${file}`, h.ctx);
+		const set = readFileSync(file, "utf8");
+		expect(set).toContain("## Q1 · update · turn 3 → 4");
+		expect(set).toContain("Answer: build/fixes.");
+		expect(set).toContain("Outdated: build/base.");
+		expect(h.notes.at(-1)).toContain("1 answers were revised by a later turn – 1 became update questions");
 	});
 
 	it("refuses an unreadable or empty question set", async () => {

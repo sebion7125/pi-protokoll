@@ -2796,6 +2796,10 @@ export const RECALL_TOOL_ROUNDS = 6;
 export const RECALL_QUESTION_CHARS = 300;
 /** answer budget of one recall request, also the room kept free in the window check */
 export const RECALL_ANSWER_TOKENS = 400;
+/** The judge thinks before its one-word verdict: room for the reasoning plus the word. */
+export const RECALL_JUDGE_TOKENS = 1024;
+/** Reasoning level of the judge request. With reasoning off it rated tool calls written as text as correct. */
+export const RECALL_JUDGE_REASONING = "low" as const;
 /** shorter user messages ("yes, go ahead") give no question that names the subject */
 export const RECALL_MIN_USER_CHARS = 20;
 
@@ -2908,6 +2912,10 @@ export interface RecallAnswer {
 	similarity: number;
 	/** lookup tools the model called before it answered (`--tools` only) */
 	toolCalls?: number;
+	/** the model still wrote a tool call when no lookup round was left: no answer */
+	gaveUp?: boolean;
+	/** a second, independent judge verdict (`--judge-twice`), to measure how consistent the judge is */
+	verdict2?: RecallVerdict;
 }
 
 /** What the judge is asked. The record is detailed; a correct answer only needs its core. */
@@ -2931,17 +2939,20 @@ export function recallJudgePrompt(question: string, expected: string, answer: st
 }
 
 export function recallJudgeVerdict(text: string | undefined): RecallVerdict {
-	const m = text ? /\b(CORRECT|PARTIAL|UNKNOWN|WRONG)\b/i.exec(text) : null;
+	// the last verdict word counts: a judge that explains itself ends with the verdict
+	const all = text ? [...text.matchAll(/\b(CORRECT|PARTIAL|UNKNOWN|WRONG)\b/gi)] : [];
+	const m = all.at(-1);
 	return m ? (m[1].toLowerCase() as RecallVerdict) : "unscored";
 }
 
 /**
  * The verdict that needs no judge, or undefined when the judge has to decide: an empty answer is
- * unknown, a tool call written as text (no tools declared) is a lookup.
+ * unknown; a tool call written as text is a lookup when no tools were declared, and unknown when they
+ * were – then the model used up its lookup rounds and still did not answer.
  */
 export function recallPreVerdict(answer: string | undefined, withTools: boolean): RecallVerdict | undefined {
 	if (!answer || !answer.trim()) return "unknown";
-	if (!withTools && recallWantsLookup(answer)) return "lookup";
+	if (recallWantsLookup(answer)) return withTools ? "unknown" : "lookup";
 	return undefined;
 }
 

@@ -98,6 +98,8 @@ import {
 	RECALL_ANSWER_TOKENS,
 	RECALL_DEFAULT_ITEMS,
 	RECALL_ENTRY,
+	RECALL_JUDGE_REASONING,
+	RECALL_JUDGE_TOKENS,
 	RECALL_MAX_ITEMS,
 	RECALL_TOOL_ROUNDS,
 	type RecallAnswer,
@@ -118,6 +120,7 @@ import {
 	recallTotals,
 	recallTotalsLine,
 	recallVerbatim,
+	recallWantsLookup,
 	renderStatus,
 	renderSummary,
 	STATE_ENTRY,
@@ -156,13 +159,19 @@ import {
 	MAX_GENERATED_QUESTIONS,
 	parseGenerated,
 	parseQuestionFile,
+	parseResultsReport,
+	parseRevision,
 	type QuestionResult,
 	questionJudgePrompt,
 	questionLeaks,
 	questionReport,
 	questionSummaryLine,
 	type RecallQuestion,
+	type ReusedAnswers,
 	recordOf,
+	revisionCheckPrompt,
+	sameQuestion,
+	termOccurs,
 	topicLines,
 	updatePairs,
 	updateQuestionPrompt,
@@ -1968,13 +1977,22 @@ export default function protokoll(pi: ExtensionAPI) {
 		expected: string,
 		prompt: () => string,
 		counter: { calls: number },
+		twice = false,
 	): Promise<RecallAnswer> {
 		const pre = recallPreVerdict(text, withTools);
 		const sim = text && expected ? similarity(text, expected) : 0;
-		if (pre) return { text, verdict: pre, similarity: sim };
-		counter.calls++;
-		const reply = await ask(ctx, prompt(), 16, ctx.signal, undefined, "off");
-		return { text, verdict: recallJudgeVerdict(reply), similarity: sim };
+		if (pre) {
+			const gaveUp = withTools && pre === "unknown" && !!text?.trim() && recallWantsLookup(text);
+			return { text, verdict: pre, similarity: sim, ...(gaveUp ? { gaveUp } : {}) };
+		}
+		const once = async () => {
+			counter.calls++;
+			const reply = await ask(ctx, prompt(), RECALL_JUDGE_TOKENS, ctx.signal, undefined, RECALL_JUDGE_REASONING);
+			return recallJudgeVerdict(reply);
+		};
+		const verdict = await once();
+		const verdict2 = twice ? await once() : undefined;
+		return { text, verdict, similarity: sim, ...(verdict2 ? { verdict2 } : {}) };
 	}
 
 	/** Writes a report; asks before overwriting, falls back to the working directory if writing fails. */
@@ -2189,16 +2207,22 @@ export default function protokoll(pi: ExtensionAPI) {
 		// spread first: the first `fact` picks cover the session evenly, the rest are reserves
 		const first = recallPick(candidates, counts.fact, opts.seed, Number.POSITIVE_INFINITY);
 		const order = [...first, ...picked.filter((t) => !first.includes(t))];
-		const pairs = counts.update > 0 ? updatePairs(turns, protocols, cutIndex) : [];
+		const pairs = updatePairs(turns, protocols, cutIndex);
+		const byNumber = new Map(turns.map((t) => [t.number, t]));
+		// one message of the user as language sample for the requests that only see protocols
+		const sample = [...turns]
+			.reverse()
+			.map((t) => genUserText(t))
+			.find((u) => u.trim().length >= 40);
 		ctx.ui.notify(
 			`${label}: ${counts.fact} fact, ${counts.abstain} abstain, ${counts.update} update questions wanted · ` +
-				`${candidates.length} turns outside the detail tier, ${pairs.length} possible revisions · ` +
-				"one model call per attempt",
+				`${candidates.length} turns outside the detail tier, ${pairs.length} revoked rules · ` +
+				"up to two model calls per fact question (write it, then check whether a later turn revised it)",
 			"info",
 		);
 
 		const bar = new Progress(ctx, "protokoll questions", undefined, 240);
-		const factStep = bar.add(`fact questions 0/${counts.fact}`);
+		const factStep = counts.fact ? bar.add(`fact questions 0/${counts.fact}`) : undefined;
 		const abstainStep = counts.abstain ? bar.add(`abstain questions 0/${counts.abstain}`) : undefined;
 		const updateStep = counts.update ? bar.add(`update questions 0/${counts.update}`) : undefined;
 		const questions: RecallQuestion[] = [];
@@ -2211,60 +2235,123 @@ export default function protokoll(pi: ExtensionAPI) {
 		const nextId = () => `Q${questions.length + 1}`;
 		try {
 			// fact
-			bar.start(factStep);
 			let made = 0;
 			let leaks = 0;
-			for (const t of order) {
+			let revised = 0;
+			let updates = 0;
+			if (factStep) bar.start(factStep);
+			for (const t of factStep ? order : []) {
 				if (made >= counts.fact || signal?.aborted) break;
 				// at most twice the wanted number of attempts
 				if (made + leaks >= counts.fact * 2 + 5) break;
 				const f = protocols.get(t.userEntryId)?.fields;
 				if (!f) continue;
-				const g = parseGenerated(await gen(factQuestionPrompt(genUserText(t), f), factStep))[0];
+				const g = parseGenerated(await gen(factQuestionPrompt(genUserText(t), f), factStep as Step))[0];
 				if (!g?.answer) continue;
 				if (questionLeaks(g.question, g.answer)) {
 					leaks++;
 					continue;
 				}
+				// later turns about the same subject: did one of them replace this answer?
+				const later = searchTurns(branch, `${g.question} ${g.answer}`, 15)
+					.filter((h) => h.turn > t.number)
+					.slice(0, 5)
+					.map((h) => {
+						const lt = byNumber.get(h.turn);
+						return { turn: h.turn, text: (lt && recordOf(protocols.get(lt.userEntryId))) || h.text };
+					});
+				const rev = later.length
+					? parseRevision(
+							await gen(
+								revisionCheckPrompt({ question: g.question, answer: g.answer, turn: t.number }, later, sample),
+								factStep as Step,
+							),
+							t.number,
+						)
+					: undefined;
+				if (rev) {
+					// a replaced fact is a bad fact question, but a good update question
+					revised++;
+					if (updates < counts.update) {
+						questions.push({
+							id: nextId(),
+							kind: "update",
+							oldTurn: t.number,
+							turn: rev.turn,
+							question: g.question,
+							answer: rev.answer,
+							outdated: g.answer,
+						});
+						updates++;
+					}
+					continue;
+				}
 				questions.push({ id: nextId(), kind: "fact", turn: t.number, question: g.question, answer: g.answer });
 				made++;
-				bar.relabel(factStep, `fact questions ${made}/${counts.fact}`);
+				bar.relabel(factStep as Step, `fact questions ${made}/${counts.fact}`);
 			}
-			bar.finish(factStep, made > 0, leaks ? `${leaks} dropped: the question gave the answer away` : undefined);
-			if (made < counts.fact) notes.push(`fact: ${made} of ${counts.fact} (not enough usable turns)`);
+			if (factStep) {
+				const why = [
+					leaks ? `${leaks} dropped: the question gave the answer away` : "",
+					revised ? `${revised} revised later (${updates} kept as update questions)` : "",
+				].filter(Boolean);
+				bar.finish(factStep, made > 0, why.join(" · ") || undefined);
+				if (made < counts.fact) notes.push(`fact: ${made} of ${counts.fact} (not enough usable turns)`);
+				if (revised)
+					notes.push(`fact: ${revised} answers were revised by a later turn – ${updates} became update questions`);
+			}
 
 			// abstain
 			if (abstainStep && !signal?.aborted) {
 				bar.start(abstainStep);
 				const topics = topicLines(turns, protocols);
-				const got = parseGenerated(
-					await gen(abstainQuestionPrompt(topics, counts.abstain), abstainStep, 800),
-				).slice(0, counts.abstain);
-				for (const g of got) {
-					const hit = searchTurns(branch, g.question, 1)[0];
-					questions.push({
-						id: nextId(),
-						kind: "abstain",
-						question: g.question,
-						answer: ABSTAIN_ANSWER,
-						check: hit
-							? `closest search hit: ${hit.text.split("\n")[0]} – make sure it does not answer the question`
-							: "no search hit at all",
-					});
+				// everything the session holds, to check that the key term of a question never came up
+				const sessionText = branch
+					.map((e) => JSON.stringify(e.message ?? (e as { data?: unknown }).data ?? ""))
+					.join("\n")
+					.toLowerCase();
+				let kept = 0;
+				let dropped = 0;
+				for (let round = 0; round < 3 && kept < counts.abstain && !signal?.aborted; round++) {
+					// ask for twice as many as still needed: some will turn out to be answerable
+					const want = (counts.abstain - kept) * 2;
+					const got = parseGenerated(await gen(abstainQuestionPrompt(topics, want, sample), abstainStep, 1200));
+					for (const g of got) {
+						if (kept >= counts.abstain) break;
+						if (!g.key || termOccurs(sessionText, g.key)) {
+							dropped++;
+							continue;
+						}
+						if (questions.some((q) => q.kind === "abstain" && sameQuestion(q.question, g.question))) continue;
+						questions.push({
+							id: nextId(),
+							kind: "abstain",
+							question: g.question,
+							answer: ABSTAIN_ANSWER,
+							check: `key term "${g.key}" occurs nowhere in the session text – still read the question: it must not be answerable without that term`,
+						});
+						kept++;
+						bar.relabel(abstainStep, `abstain questions ${kept}/${counts.abstain}`);
+					}
 				}
-				bar.finish(abstainStep, got.length > 0, `${got.length}/${counts.abstain}`);
-				if (got.length < counts.abstain) notes.push(`abstain: ${got.length} of ${counts.abstain}`);
+				bar.finish(
+					abstainStep,
+					kept > 0,
+					`${kept}/${counts.abstain}${dropped ? `, ${dropped} dropped: key term missing or found in the session` : ""}`,
+				);
+				if (kept < counts.abstain)
+					notes.push(`abstain: ${kept} of ${counts.abstain} (${dropped} dropped by the key-term check)`);
 			}
 
 			// update
 			if (updateStep && !signal?.aborted) {
 				bar.start(updateStep);
-				let done = 0;
+				let done = questions.filter((q) => q.kind === "update").length;
 				let tried = 0;
 				for (const p of pairs) {
 					if (done >= counts.update || signal?.aborted || tried >= counts.update * 4 + 5) break;
 					tried++;
-					const g = parseGenerated(await gen(updateQuestionPrompt(p.older, p.newer), updateStep))[0];
+					const g = parseGenerated(await gen(updateQuestionPrompt(p.older, p.newer, sample), updateStep))[0];
 					if (!g?.answer || questionLeaks(g.question, g.answer)) continue;
 					questions.push({
 						id: nextId(),
@@ -2309,7 +2396,7 @@ export default function protokoll(pi: ExtensionAPI) {
 	 */
 	async function runQuestionSet(
 		source: string,
-		opts: { fold: boolean; tools: boolean; file: string },
+		opts: { fold: boolean; tools: boolean; file: string; reuse: string; judgeTwice: boolean },
 		ctx: ExtensionContext,
 	): Promise<void> {
 		const label = "protokoll recall --questions";
@@ -2337,6 +2424,25 @@ export default function protokoll(pi: ExtensionAPI) {
 			);
 			return;
 		}
+		// answers of an earlier run: questions with the same text are only judged again, not asked
+		let reused = new Map<string, ReusedAnswers>();
+		const reusePath = opts.reuse ? outputPath(opts.reuse, ctx.cwd) : "";
+		if (reusePath) {
+			try {
+				reused = parseResultsReport(readFileSync(reusePath, "utf8"));
+			} catch (err) {
+				ctx.ui.notify(
+					`${label}: cannot read ${reusePath} (${err instanceof Error ? err.message : String(err)})`,
+					"error",
+				);
+				return;
+			}
+		}
+		const reuseOf = (q: RecallQuestion) => {
+			const r = reused.get(q.id);
+			return r && sameQuestion(r.question, q.question) ? r : undefined;
+		};
+		const toAsk = questions.filter((q) => !reuseOf(q)).length;
 		const signal = ctx.signal;
 		const stop = () => {
 			if (signal?.aborted) ctx.ui.notify(`${label}: aborted`, "warning");
@@ -2348,8 +2454,11 @@ export default function protokoll(pi: ExtensionAPI) {
 			return;
 		}
 		const skipped = errors.map((e) => `${e} (not asked)`);
+		const judgeCalls = questions.length * 2 * (opts.judgeTwice ? 2 : 1);
 		ctx.ui.notify(
-			`${label}: ${questions.length} questions × 2 contexts = ${questions.length * 2} answers + up to ${questions.length * 2} judge calls` +
+			`${label}: ${toAsk} questions × 2 contexts = ${toAsk * 2} answers` +
+				(questions.length > toAsk ? ` (${questions.length - toAsk} reused from ${reusePath})` : "") +
+				` + up to ${judgeCalls} judge calls` +
 				(opts.tools ? `, each answer may take up to ${RECALL_TOOL_ROUNDS} lookup rounds` : ", no lookup tools") +
 				(errors.length ? ` · ${errors.length} sections of the file not usable` : ""),
 			"info",
@@ -2365,32 +2474,54 @@ export default function protokoll(pi: ExtensionAPI) {
 		const counter = { calls: 0 };
 		const bar = new Progress(ctx, "protokoll recall", undefined, 240);
 		const answer = recallAnswerer(ctx, setup.branch, bar, opts.tools, counter);
-		const steps = questions.map((q) => ({
-			a: bar.add(`${q.id} ${q.kind} · A (with state of work)`),
-			b: bar.add(`${q.id} ${q.kind} · B (without)`),
-			judge: bar.add(`${q.id} · judge`),
-		}));
+		const steps = questions.map((q) =>
+			reuseOf(q)
+				? { judge: bar.add(`${q.id} · judge (answers reused)`) }
+				: {
+						a: bar.add(`${q.id} ${q.kind} · A (with state of work)`),
+						b: bar.add(`${q.id} ${q.kind} · B (without)`),
+						judge: bar.add(`${q.id} · judge`),
+					},
+		);
 		const rows: QuestionResult[] = [];
 		try {
 			for (let i = 0; i < questions.length; i++) {
 				if (stop()) break;
 				const q = questions[i];
 				const st = steps[i];
-				const ansA = await answer(`${setup.textA}\n\n${askText(q)}`, st.a);
-				if (stop()) break;
-				const ansB = await answer(`${setup.textB}\n\n${askText(q)}`, st.b);
-				if (stop()) break;
+				const old = reuseOf(q);
+				let ansA: { text?: string; toolCalls?: number };
+				let ansB: { text?: string; toolCalls?: number };
+				if (old) {
+					ansA = old.a;
+					ansB = old.b;
+				} else {
+					ansA = await answer(`${setup.textA}\n\n${askText(q)}`, st.a as Step);
+					if (stop()) break;
+					ansB = await answer(`${setup.textB}\n\n${askText(q)}`, st.b as Step);
+					if (stop()) break;
+				}
+				// a reused answer was given with tools when the old report counted its lookups
+				const withTools = old ? old.a.toolCalls !== undefined : opts.tools;
 				const t = q.kind === "fact" && q.turn !== undefined ? byNumber.get(q.turn) : undefined;
 				const record = t ? recordOf(setup.protocols.get(t.userEntryId)) : "";
 				bar.start(st.judge);
 				const rate = (text: string | undefined) =>
-					recallJudge(ctx, text, opts.tools, q.answer, () => questionJudgePrompt(q, text ?? "", record), counter);
+					recallJudge(
+						ctx,
+						text,
+						withTools,
+						q.answer,
+						() => questionJudgePrompt(q, text ?? "", record),
+						counter,
+						opts.judgeTwice,
+					);
 				const ra = await rate(ansA.text);
 				const rb = await rate(ansB.text);
 				bar.finish(st.judge, true, `A ${ra.verdict} · B ${rb.verdict}`);
-				if (opts.tools) {
-					ra.toolCalls = ansA.toolCalls;
-					rb.toolCalls = ansB.toolCalls;
+				if (withTools) {
+					ra.toolCalls = ansA.toolCalls ?? 0;
+					rb.toolCalls = ansB.toolCalls ?? 0;
 				}
 				const location = locate(q.kind === "abstain" ? undefined : q.turn);
 				rows.push({ q, a: ra, b: rb, ...(location ? { location } : {}) });
@@ -2421,6 +2552,7 @@ export default function protokoll(pi: ExtensionAPI) {
 			tools: opts.tools,
 			modelCalls: counter.calls,
 			skipped,
+			...(reusePath ? { reused: { file: reusePath, count: questions.length - toAsk } } : {}),
 		}).join("\n")}\n`;
 		await writeReport(ctx, reportPath, text, "protokoll-recall-questions", short);
 	}
@@ -2454,7 +2586,7 @@ export default function protokoll(pi: ExtensionAPI) {
 
 	pi.registerCommand("protokoll", {
 		description:
-			"Session protocol: status | show | export [file] | stats [--file <path>] | recall [n] [--tools] [--fold] [--seed N] [--file <path>] | recall --make-questions [N] [--abstain K] [--update K] [--file <path>] | recall --questions <file> [--no-tools] [--fold] [--file <path>] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
+			"Session protocol: status | show | export [file] | stats [--file <path>] | recall [n] [--tools] [--fold] [--seed N] [--file <path>] | recall --make-questions [N] [--abstain K] [--update K] [--file <path>] | recall --questions <file> [--no-tools] [--fold] [--reuse <results.md>] [--judge-twice] [--file <path>] | pin N | unpin N | on | off [--strip] | reload | rebuild | repair",
 		getArgumentCompletions: (prefix) =>
 			SUB.filter((s) => s.startsWith(prefix.trim())).map((s) => ({ value: s, label: s })),
 		handler: async (args, ctx) => {
@@ -2725,7 +2857,15 @@ export default function protokoll(pi: ExtensionAPI) {
 						const i = rest.indexOf(`--${name}`);
 						return i >= 0 ? rest[i + 1] : undefined;
 					};
-					const valueFlags = ["--seed", "--file", "--questions", "--abstain", "--update", "--make-questions"];
+					const valueFlags = [
+						"--seed",
+						"--file",
+						"--questions",
+						"--abstain",
+						"--update",
+						"--make-questions",
+						"--reuse",
+					];
 					const values = new Set(valueFlags.map((f) => rest.indexOf(f) + 1).filter((i) => i > 0));
 					const num = (name: string): number | undefined => {
 						const v = Number.parseInt(of(name) ?? "", 10);
@@ -2746,7 +2886,13 @@ export default function protokoll(pi: ExtensionAPI) {
 					if (set) {
 						await runQuestionSet(
 							set,
-							{ fold: rest.includes("--fold"), tools: !rest.includes("--no-tools"), file: of("file") ?? "" },
+							{
+								fold: rest.includes("--fold"),
+								tools: !rest.includes("--no-tools"),
+								file: of("file") ?? "",
+								reuse: of("reuse") ?? "",
+								judgeTwice: rest.includes("--judge-twice"),
+							},
 							ctx,
 						);
 						return;

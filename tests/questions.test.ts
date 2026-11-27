@@ -4,16 +4,22 @@ import {
 	ABSTAIN_ANSWER,
 	discordant,
 	formatQuestionFile,
+	isEmptyItem,
 	lookupQuadrants,
 	mcnemarExact,
 	parseGenerated,
 	parseQuestionFile,
+	parseResultsReport,
+	parseRevision,
 	type QuestionResult,
 	questionJudgePrompt,
 	questionLeaks,
 	questionReport,
 	type RecallQuestion,
 	rateLine,
+	revisionCheckPrompt,
+	sameQuestion,
+	termOccurs,
 	updatePairs,
 	wilson,
 } from "../src/questions.ts";
@@ -88,28 +94,84 @@ describe("generating questions", () => {
 		expect(questionLeaks("What is the tolerance factor?", answer)).toBe(false);
 	});
 
-	it("finds revoked and restated rules first, then similar statements, only with the older turn before the cut", () => {
+	it("pairs only explicitly revoked rules, ignores restatements and empty revokes", () => {
 		const { turns, protocols } = session([
 			{ rule: ["always push grandorgue branches to the fork"] },
 			{ result: ["buffer size for the ceiling sweep set to 256 frames"] },
-			{ result: ["unrelated work on the docs"] },
 			{ revoke: ["push grandorgue branches"] },
-			{ result: ["buffer size for the ceiling sweep set to 128 frames after the retest"] },
-			{ rule: ["always push grandorgue branches to the private mirror"] },
+			// the same rule in other words is no revision; "none", "no" and "(none withdrawn)" revoke nothing
+			{ rule: ["always push the grandorgue branches to our fork"], revoke: ["none"] },
+			{ rule: ["no"], revoke: ["(none withdrawn)"] },
+			{ revoke: ["no"] },
 		]);
-		const pairs = updatePairs(turns, protocols, 99);
-		expect(pairs[0]).toMatchObject({
-			via: "rule",
-			older: { turn: 1 },
-			newer: { turn: 4, text: "Revoked: push grandorgue branches" },
-		});
-		expect(pairs.some((p) => p.via === "rule" && p.older.turn === 1 && p.newer.turn === 6)).toBe(true);
-		expect(pairs.some((p) => p.via === "statement" && p.older.turn === 2 && p.newer.turn === 5)).toBe(true);
-		// the rules come before the statements
-		const firstStatement = pairs.findIndex((p) => p.via === "statement");
-		expect(pairs.slice(firstStatement).every((p) => p.via === "statement")).toBe(true);
-		// nothing older than the cut, nothing to pair
+		expect(updatePairs(turns, protocols, 99)).toEqual([
+			{
+				older: { turn: 1, text: "Rule: always push grandorgue branches to the fork" },
+				newer: { turn: 3, text: "Revoked: push grandorgue branches" },
+			},
+		]);
 		expect(updatePairs(turns, protocols, 0)).toEqual([]);
+		expect(isEmptyItem("(none withdrawn)")).toBe(true);
+		expect(isEmptyItem("no")).toBe(true);
+		expect(isEmptyItem("keine")).toBe(true);
+		expect(isEmptyItem("no push to grandorgue branches")).toBe(true);
+		expect(isEmptyItem("always run tests before pushing")).toBe(false);
+	});
+
+	it("checks a fact against later turns and reads the revision", () => {
+		const prompt = revisionCheckPrompt(
+			{ question: "Welches Baseline-Binary?", answer: "build/base", turn: 108 },
+			[{ turn: 175, text: "build/fixes stays the acceptance binary" }],
+			"wie ist der stand?",
+		);
+		expect(prompt).toContain("Answer (turn 108): build/base");
+		expect(prompt).toContain("Turn 175: build/fixes stays the acceptance binary");
+		expect(prompt).toContain(
+			"the same content in other words, more detail, or a different subject is NOT a revision",
+		);
+		expect(prompt).toContain("«wie ist der stand?»");
+		expect(parseRevision("CURRENT", 108)).toBeUndefined();
+		expect(parseRevision("REVISED\nTURN: 175\nANSWER: build/fixes", 108)).toEqual({
+			turn: 175,
+			answer: "build/fixes",
+		});
+		// a revision has to come later and needs an answer
+		expect(parseRevision("REVISED\nTURN: 90\nANSWER: x", 108)).toBeUndefined();
+		expect(parseRevision("REVISED\nTURN: 175", 108)).toBeUndefined();
+		expect(termOccurs("… the arena grows to 1,86 gb …", "Arena")).toBe(true);
+		expect(termOccurs("… nothing here …", "samplerate_hz")).toBe(false);
+		expect(termOccurs("anything", "  ")).toBe(false);
+	});
+
+	it("reads the answers back from a report and matches questions by their text", () => {
+		const md = [
+			"### Q1 · fact · turn 3 — A: correct (4 lookups) · B: wrong (2 lookups, gave up)",
+			"",
+			"Question: Warum 2 ULP?",
+			"",
+			"Reference: x",
+			"",
+			"Answer A: weil 1 ulp gemessen wurde",
+			"",
+			"Answer B: (no answer)",
+			"",
+			"### Q2 · abstain — A: wrong · B: correct",
+			"",
+			"Question: Welche Farbe?",
+			"",
+			"Answer A: rot",
+			"",
+			"Answer B: nie besprochen",
+		].join("\n");
+		const r = parseResultsReport(md);
+		expect(r.get("Q1")).toEqual({
+			question: "Warum 2 ULP?",
+			a: { text: "weil 1 ulp gemessen wurde", toolCalls: 4 },
+			b: { text: undefined, toolCalls: 2 },
+		});
+		expect(r.get("Q2")?.a).toEqual({ text: "rot", toolCalls: undefined });
+		expect(sameQuestion("Warum  2 ULP?\n", "Warum 2 ULP?")).toBe(true);
+		expect(sameQuestion("Warum 3 ULP?", "Warum 2 ULP?")).toBe(false);
 	});
 
 	it("does not pair a statement with its own identical repetition", () => {

@@ -61,7 +61,7 @@ function fieldLines(f: ProtocolFields): string[] {
 }
 
 const SHARED_RULES = [
-	"- Ask the way the user writes, in the language of the user's messages.",
+	"- Ask the way the user writes, in the language of the user's messages – even when the protocol is in another language.",
 	"- Name the subject so the question has one clear answer, but do not give the answer away: no numbers, identifiers, file names or values from the answer in the question.",
 	"- Do not mention turns, protocols, summaries or 'earlier you wrote'.",
 ];
@@ -87,8 +87,14 @@ export function factQuestionPrompt(userText: string, fields: ProtocolFields): st
 	].join("\n");
 }
 
+/** One message of the user, so the request sees which language to write in. */
+function languageLine(sample: string | undefined): string[] {
+	const t = sample?.replace(/\s+/g, " ").trim();
+	return t ? ["", `How the user writes (use this language): «${t.slice(0, 300)}»`] : [];
+}
+
 /** Questions about things the session never discussed, built next to its real topics. */
-export function abstainQuestionPrompt(topics: string[], count: number): string {
+export function abstainQuestionPrompt(topics: string[], count: number, languageSample?: string): string {
 	return [
 		"You write test questions for the memory of a coding assistant. Below are the topics of a long session, one line per turn.",
 		"",
@@ -97,9 +103,12 @@ export function abstainQuestionPrompt(topics: string[], count: number): string {
 		"- in the language of the topic lines",
 		"- not answerable from the list, not even partly",
 		"- each about a different subject",
+		"- each hinges on one specific term that never appears in the topics (an identifier, parameter, file, component or tool name); name it after the question",
+		...languageLine(languageSample),
 		"",
-		"Format: one per line, nothing else:",
+		"Format, nothing else:",
 		"QUESTION: …",
+		"KEY: … (the one specific term the question hinges on)",
 		"",
 		"Topics:",
 		...topics,
@@ -110,6 +119,7 @@ export function abstainQuestionPrompt(topics: string[], count: number): string {
 export function updateQuestionPrompt(
 	older: { turn: number; text: string },
 	newer: { turn: number; text: string },
+	languageSample?: string,
 ): string {
 	return [
 		"Two statements from different turns of a long coding session, about the same subject.",
@@ -117,9 +127,10 @@ export function updateQuestionPrompt(
 		`Older: ${older.text}`,
 		`Newer: ${newer.text}`,
 		"",
-		"Does the newer statement replace, revoke or correct the older one, so that the older one is no longer valid? If not – they are about different things, or the newer one only adds to the older one – reply NONE.",
+		"Does the newer statement replace, revoke or correct the older one, so that the older one is no longer valid? A value, a choice or a rule has to differ – the same content in other words is NOT a revision. If not – they are about different things, the newer one says the same, or it only adds to the older one – reply NONE.",
 		"If it does, write ONE question the user could ask at the end of the session about the current state: its correct answer is the newer statement, and the older statement would be the outdated answer.",
 		...SHARED_RULES,
+		...languageLine(languageSample),
 		"",
 		"Format exactly:",
 		"QUESTION: …",
@@ -132,6 +143,8 @@ export interface GeneratedQuestion {
 	question: string;
 	answer?: string;
 	outdated?: string;
+	/** abstain: the term the question hinges on */
+	key?: string;
 }
 
 /** Reads QUESTION/ANSWER/OUTDATED lines; NONE or nothing usable gives an empty list. */
@@ -144,7 +157,7 @@ export function parseGenerated(text: string | undefined): GeneratedQuestion[] {
 			.trim()
 			.replace(/^[-*]\s+/, "")
 			.replace(/^\*\*(\w+):\*\*/, "$1:");
-		const m = /^(QUESTION|ANSWER|OUTDATED)\s*:\s*(.*)$/i.exec(line);
+		const m = /^(QUESTION|ANSWER|OUTDATED|KEY)\s*:\s*(.*)$/i.exec(line);
 		if (!m) continue;
 		const key = m[1].toUpperCase();
 		const value = m[2].trim();
@@ -154,6 +167,7 @@ export function parseGenerated(text: string | undefined): GeneratedQuestion[] {
 			out.push(cur);
 		} else if (cur && key === "ANSWER") cur.answer = value;
 		else if (cur && key === "OUTDATED") cur.outdated = value;
+		else if (cur && key === "KEY") cur.key = value.replace(/^[`"'«»„“]+|[`"'«»„“]+$/g, "");
 	}
 	return out;
 }
@@ -187,9 +201,6 @@ export function topicLines(turns: Turn[], protocols: Map<string, ProtocolEntryDa
 export interface UpdatePair {
 	older: { turn: number; text: string };
 	newer: { turn: number; text: string };
-	/** rule: a rule revoked or restated; statement: similar results or decisions */
-	via: "rule" | "statement";
-	score: number;
 }
 
 const normText = (s: string) =>
@@ -198,68 +209,89 @@ const normText = (s: string) =>
 		.replace(/[^\p{L}\p{N}]+/gu, " ")
 		.trim();
 
+/** A rule or revoke line that says "nothing": none, no, (none withdrawn), keine … */
+export function isEmptyItem(text: string): boolean {
+	const t = text.trim().replace(/^[([]+|[)\].]+$/g, "");
+	return isNoneItem(text) || t.length < 4 || /^(none|no|nothing|n\/a|keine?|nichts)\b/i.test(t);
+}
+
 /**
- * Pairs of turns where a later statement may have replaced an earlier one. Rules that were revoked
- * or restated come first; then results and decisions that resemble an earlier one without being the
- * same. The older turn has to lie before `cutIndex`. Whether a pair is a real revision is left to the
- * model (`updateQuestionPrompt` may answer NONE).
+ * Rules that a later turn revoked, as pairs (older turn with the rule, newer turn with the revoke). The
+ * older turn has to lie before `cutIndex`. A rule restated in other words is no revision – the model
+ * writes its rules anew every turn – so only explicit revokes count. Results and decisions that were
+ * replaced later are found per fact question by `revisionCheckPrompt`.
  */
 export function updatePairs(turns: Turn[], protocols: Map<string, ProtocolEntryData>, cutIndex: number): UpdatePair[] {
-	type Stmt = { turn: Turn; text: string; rule: boolean };
-	const seen: Stmt[] = [];
-	const rules: UpdatePair[] = [];
-	const statements: UpdatePair[] = [];
+	const rules: { turn: Turn; text: string }[] = [];
+	const out: UpdatePair[] = [];
 	const taken = new Set<string>();
-	const add = (list: UpdatePair[], p: UpdatePair) => {
-		const key = `${p.older.turn}>${p.newer.turn}`;
-		if (taken.has(key)) return;
-		taken.add(key);
-		list.push(p);
-	};
 	for (const t of turns) {
 		const f = protocols.get(t.userEntryId)?.fields;
 		if (!f) continue;
-		const earlier = seen.filter((s) => s.turn.index < cutIndex);
 		for (const r of f.revoke) {
+			if (isEmptyItem(r)) continue;
 			const nr = normText(r);
-			if (!nr) continue;
-			const old = [...earlier]
+			const old = [...rules]
 				.reverse()
-				.find((s) => s.rule && (normText(s.text).includes(nr) || nr.includes(normText(s.text))));
-			if (old)
-				add(rules, {
-					older: { turn: old.turn.number, text: `Rule: ${old.text}` },
-					newer: { turn: t.number, text: `Revoked: ${r}` },
-					via: "rule",
-					score: 1,
-				});
-		}
-		const own: Stmt[] = [
-			...f.rule.filter((r) => !isNoneItem(r)).map((text) => ({ turn: t, text, rule: true })),
-			...[...f.result, ...f.decision].map((text) => ({ turn: t, text, rule: false })),
-		];
-		for (const s of own) {
-			let best: { stmt: Stmt; sim: number } | undefined;
-			for (const e of earlier) {
-				if (e.rule !== s.rule) continue;
-				const sim = similarity(e.text, s.text);
-				// identical wording is a repetition, not a revision
-				if (sim < 0.35 || sim >= 0.95) continue;
-				if (!best || sim > best.sim) best = { stmt: e, sim };
-			}
-			if (!best) continue;
-			const label = s.rule ? "Rule" : "Statement";
-			add(s.rule ? rules : statements, {
-				older: { turn: best.stmt.turn.number, text: `${label}: ${best.stmt.text}` },
-				newer: { turn: t.number, text: `${label}: ${s.text}` },
-				via: s.rule ? "rule" : "statement",
-				score: best.sim,
+				.find((s) => s.turn.index < cutIndex && (normText(s.text).includes(nr) || nr.includes(normText(s.text))));
+			const key = old ? `${old.turn.number}>${t.number}` : "";
+			if (!old || taken.has(key)) continue;
+			taken.add(key);
+			out.push({
+				older: { turn: old.turn.number, text: `Rule: ${old.text}` },
+				newer: { turn: t.number, text: `Revoked: ${r}` },
 			});
 		}
-		seen.push(...own);
+		for (const r of f.rule) if (!isEmptyItem(r)) rules.push({ turn: t, text: r });
 	}
-	statements.sort((a, b) => b.score - a.score);
-	return [...rules, ...statements];
+	return out;
+}
+
+/**
+ * Asks whether the answer of a fact question still holds at the end of the session, given what later
+ * turns about the same subject recorded. A fact that was replaced later makes a bad fact question – a
+ * model answers with the newer state – but a good update question.
+ */
+export function revisionCheckPrompt(
+	q: { question: string; answer: string; turn: number },
+	later: { turn: number; text: string }[],
+	languageSample?: string,
+): string {
+	return [
+		"A test question about a long coding session, the answer recorded for it, and what later turns of the same session recorded about related subjects.",
+		"",
+		`Question: ${q.question}`,
+		`Answer (turn ${q.turn}): ${q.answer}`,
+		"",
+		"Later turns:",
+		...later.map((l) => `Turn ${l.turn}: ${l.text.replace(/\s+/g, " ").slice(0, 600)}`),
+		"",
+		"Does a later turn replace, revoke or correct this answer, so that at the end of the session a different answer is right? A value, a choice, a path or a rule has to differ – the same content in other words, more detail, or a different subject is NOT a revision.",
+		"If nothing replaced it, reply exactly: CURRENT",
+		"If something did, reply in this format, the answer in the language of the question:",
+		"REVISED",
+		"TURN: <number of the turn with the newer state>",
+		"ANSWER: <the answer that is right at the end of the session>",
+		...languageLine(languageSample),
+	].join("\n");
+}
+
+/** Reads the verdict of `revisionCheckPrompt`; undefined when the answer still holds or the reply is unusable. */
+export function parseRevision(
+	text: string | undefined,
+	afterTurn: number,
+): { turn: number; answer: string } | undefined {
+	if (!text || !/\bREVISED\b/i.test(text)) return undefined;
+	const turn = Number(/TURN\s*:\s*(\d+)/i.exec(text)?.[1]);
+	const answer = /ANSWER\s*:\s*(.+)/i.exec(text)?.[1]?.trim();
+	if (!answer || !Number.isFinite(turn) || turn <= afterTurn) return undefined;
+	return { turn, answer };
+}
+
+/** True when a term occurs anywhere in the session text (case-insensitive). */
+export function termOccurs(sessionText: string, term: string): boolean {
+	const t = term.trim().toLowerCase();
+	return t.length > 0 && sessionText.includes(t);
 }
 
 // ------------------------------------------------------------------ the question file
@@ -517,11 +549,32 @@ export function questionSummaryLine(rows: QuestionResult[]): string {
 }
 
 const answerCell = (a: RecallAnswer) =>
-	`${a.verdict}${typeof a.toolCalls === "number" ? ` (${a.toolCalls} lookups)` : ""}`;
+	`${a.verdict}${typeof a.toolCalls === "number" ? ` (${a.toolCalls} lookups${a.gaveUp ? ", gave up" : ""})` : ""}`;
+
+/** How often two judge requests on the same answer agreed (`--judge-twice`). */
+export function judgeAgreement(rows: QuestionResult[]): { same: number; total: number } {
+	let same = 0;
+	let total = 0;
+	for (const r of rows)
+		for (const x of [r.a, r.b])
+			if (x.verdict2) {
+				total++;
+				if (x.verdict2 === x.verdict) same++;
+			}
+	return { same, total };
+}
 
 export function questionReport(
 	rows: QuestionResult[],
-	meta: { file: string; fold: boolean; tools: boolean; modelCalls: number; skipped: string[] },
+	meta: {
+		file: string;
+		fold: boolean;
+		tools: boolean;
+		modelCalls: number;
+		skipped: string[];
+		/** results file the answers were taken from, and how many */
+		reused?: { file: string; count: number };
+	},
 ): string[] {
 	const out = [
 		"# protokoll recall – question set",
@@ -535,6 +588,12 @@ export function questionReport(
 			(meta.tools
 				? "The model had the lookup tools (protocol_search, protocol_read, protocol_turn), as in a real session."
 				: "The requests carried no tools: only what the summary itself holds counts."),
+		...(meta.reused?.count
+			? [
+					"",
+					`${meta.reused.count} questions were not asked again: their answers come from ${meta.reused.file} (same question text) and were only judged again.`,
+				]
+			: []),
 		"",
 		"## Correct answers",
 		"",
@@ -599,6 +658,12 @@ export function questionReport(
 				".",
 		);
 	}
+	const agree = judgeAgreement(rows);
+	if (agree.total)
+		out.push(
+			"",
+			`Judge consistency: a second, independent judge request gave the same verdict for ${rateLine(agree.same, agree.total)} of the answers. The tables use the first verdict.`,
+		);
 	if (meta.skipped.length) out.push("", "Skipped:", ...meta.skipped.map((s) => `- ${s}`));
 	out.push(
 		"",
@@ -607,7 +672,7 @@ export function questionReport(
 		"- correct = the core of the reference is right (details may be missing); for abstain: says it was not discussed; for update: gives the current state",
 		"- partial = part of it; for abstain: says it cannot find it but still guesses; for update: names both states without saying which holds",
 		"- unknown = says it does not know; wrong = asserts something that does not match – for abstain: presents an answer as if it had been discussed (made up); for update: gives the outdated state",
-		"- lookup = tried to call a lookup tool although none was available; unscored = the judge gave no usable verdict",
+		"- lookup = tried to call a lookup tool although none was available; gave up = still wrote a tool call when no lookup round was left (counted as unknown, no judge); unscored = the judge gave no usable verdict",
 		"- rate = correct answers / questions. 95 % CI = Wilson score interval: computed from k correct out of n, it covers the true rate (the chance of a correct answer to a question drawn from the same kind of questions) in 95 % of repeated samples. It holds for this question set and this session, and it does not cover a judge that is systematically too strict or too lenient.",
 		"- McNemar: A and B answer the same questions, so only the questions where exactly one of them is correct say anything about the difference. p = probability of a split at least this uneven if A and B were equally good; below 0.05 is the usual threshold.",
 		`- model calls: ${meta.modelCalls}`,
@@ -624,6 +689,9 @@ export function questionReport(
 					: "";
 		out.push(
 			`### ${r.q.id} · ${r.q.kind}${turn} — A: ${answerCell(r.a)} · B: ${answerCell(r.b)}`,
+			...(r.a.verdict2 || r.b.verdict2
+				? ["", `Second judge: A ${r.a.verdict2 ?? "–"} · B ${r.b.verdict2 ?? "–"}`]
+				: []),
 			"",
 			`Question: ${r.q.question}`,
 			"",
@@ -637,6 +705,50 @@ export function questionReport(
 		);
 	}
 	return out;
+}
+
+export interface ReusedAnswers {
+	question: string;
+	a: { text?: string; toolCalls?: number };
+	b: { text?: string; toolCalls?: number };
+}
+
+/**
+ * Reads the answers back from a question-set report (`*.results.md`), keyed by question id, so they
+ * can be judged again against corrected references without asking the model again.
+ */
+export function parseResultsReport(text: string): Map<string, ReusedAnswers> {
+	const out = new Map<string, ReusedAnswers>();
+	const sections = text.split(/^###[ \t]+/m).slice(1);
+	for (const sec of sections) {
+		const [head = "", ...body] = sec.split("\n");
+		const id = head.split(/\s+·\s+/)[0]?.trim();
+		const m = /— A: \w+(?: \((\d+) lookups[^)]*\))? · B: \w+(?: \((\d+) lookups[^)]*\))?/.exec(head);
+		if (!id || !m) continue;
+		const field = (name: string) => {
+			const line = body.find((l) => l.startsWith(`${name}: `));
+			return line?.slice(name.length + 2).trim();
+		};
+		const question = field("Question");
+		if (!question) continue;
+		const answer = (name: string) => {
+			const v = field(name);
+			return v && v !== "(no answer)" ? v : undefined;
+		};
+		const calls = (v: string | undefined) => (v === undefined ? undefined : Number(v));
+		out.set(id, {
+			question,
+			a: { text: answer("Answer A"), toolCalls: calls(m[1]) },
+			b: { text: answer("Answer B"), toolCalls: calls(m[2]) },
+		});
+	}
+	return out;
+}
+
+/** Same question text, ignoring whitespace – only then can an old answer be judged again. */
+export function sameQuestion(a: string, b: string): boolean {
+	const n = (s: string) => s.replace(/\s+/g, " ").trim();
+	return n(a) === n(b);
 }
 
 /** The turn text a fact question is judged against, when the session still has the protocol. */
