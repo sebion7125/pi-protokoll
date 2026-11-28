@@ -464,13 +464,47 @@ export function hasProtocolKeys(text: string): boolean {
 	return false;
 }
 
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
- * Finds the protocol block and returns the answer without it. Tags inside code are skipped. A block
+ * Turns escaped forms of the block the model sometimes writes back into plain tags, so that
+ * extraction and hiding see the same block:
+ * - `&lt;protocol&gt;`, `\<protocol\>`, `<\/protocol>` outside code become `<protocol>` / `</protocol>`;
+ * - a fenced code block that ends the answer and holds nothing but the block loses its fence,
+ *   unless the line before it ends with a colon ("Example:"), which marks a quoted example.
+ * Everything else, including examples quoted in code, stays as it is.
+ */
+export function normalizeBlockMarkup(text: string, tag: string): string {
+	const t = escapeRegExp(tag);
+	const fence = /(^|\n)([ \t]*)(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n[ \t]*\3[ \t]*\s*$/;
+	const f = fence.exec(text);
+	if (f) {
+		const start = f.index + f[1].length;
+		const before = text.slice(0, start).trimEnd();
+		const inner = f[4].trim();
+		const opens = new RegExp(`^(?:<|&lt;|\\\\<)\\\\?${t}(?:\\\\?>|&gt;)`, "i");
+		if (opens.test(inner) && hasProtocolKeys(inner) && !before.endsWith(":")) {
+			text = `${text.slice(0, start)}${inner}\n`;
+		}
+	}
+	const escaped = new RegExp(`(?:&lt;|\\\\?<)(\\\\?/)?\\\\?(${t})(?:\\\\?>|&gt;)`, "gi");
+	const ranges = codeRanges(text);
+	return text.replace(escaped, (m: string, slash: string | undefined, name: string, offset: number) =>
+		insideRanges(ranges, offset) ? m : `<${slash ? "/" : ""}${name}>`,
+	);
+}
+
+/**
+ * Finds the protocol block and returns the answer without it. Escaped tags and a fence around the
+ * whole block are undone first (normalizeBlockMarkup). Tags inside code are skipped. A block
  * that closes the answer wins; otherwise the last closed block is used and the text after it stays
  * in the answer. An unclosed tag counts only when it opens a line and is followed by protocol keys
  * (the model stopped early); a tag quoted inside a sentence is left alone.
  */
-export function extractBlock(text: string, tag: string): { body: string | undefined; rest: string } {
+export function extractBlock(original: string, tag: string): { body: string | undefined; rest: string } {
+	const text = normalizeBlockMarkup(original, tag);
 	const ranges = codeRanges(text);
 	const closeLen = tag.length + 3;
 	const openRe = new RegExp(`<${tag}>`, "gi");
@@ -499,7 +533,7 @@ export function extractBlock(text: string, tag: string): { body: string | undefi
 			}
 		}
 	}
-	if (!chosen) return { body: undefined, rest: text };
+	if (!chosen) return { body: undefined, rest: original };
 	const end = chosen.end ?? text.length;
 	const body = text.slice(chosen.open + chosen.openLen, end - (chosen.end ? closeLen : 0));
 	const tail = chosen.end ? text.slice(end) : "";
@@ -508,10 +542,12 @@ export function extractBlock(text: string, tag: string): { body: string | undefi
 }
 
 /**
- * Hides complete blocks and, while streaming, a block that has started but not finished. Blocks
+ * Hides complete blocks and, while streaming, a block that has started but not finished. Escaped
+ * tags and a fence around the whole block are undone first, as in extractBlock. Blocks
  * quoted in code stay visible, and a tag that does not open a line counts as prose.
  */
-export function hideBlocks(markdown: string, tag: string, streaming: boolean): string {
+export function hideBlocks(original: string, tag: string, streaming: boolean): string {
+	const markdown = normalizeBlockMarkup(original, tag);
 	const ranges = codeRanges(markdown);
 	const full = new RegExp(`\\s*<${tag}>[\\s\\S]*?</${tag}>\\s*`, "gi");
 	let out = "";
@@ -541,7 +577,8 @@ export function hideBlocks(markdown: string, tag: string, streaming: boolean): s
 			out = out.slice(0, lt);
 		}
 	}
-	return out.trimEnd();
+	// nothing hidden: show the answer as written, escapes included
+	return out === markdown ? original.trimEnd() : out.trimEnd();
 }
 
 /** "key: value" lines; lines without a known key continue the previous key. */

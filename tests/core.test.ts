@@ -49,6 +49,7 @@ import {
 	medianOf,
 	mergeConfig,
 	narrativeBudget,
+	normalizeBlockMarkup,
 	type PlainEntry,
 	type PlainMessage,
 	PROGRESS_PROMPT,
@@ -186,6 +187,60 @@ describe("extractBlock", () => {
 		const r = extractBlock(text, "protocol");
 		expect(r.body).toBeUndefined();
 		expect(r.rest).toBe(text);
+	});
+});
+
+describe("escaped and fenced blocks", () => {
+	const body = "result: x\ndecision: y";
+	it("extracts an HTML-escaped block", () => {
+		const r = extractBlock(`Done.\n\n&lt;protocol&gt;\n${body}\n&lt;/protocol&gt;`, "protocol");
+		expect(r.body).toBe(body);
+		expect(r.rest).toBe("Done.");
+	});
+	it("extracts a backslash-escaped block", () => {
+		const r = extractBlock(`Done.\n\\<protocol\\>\n${body}\n\\</protocol\\>`, "protocol");
+		expect(r.body).toBe(body);
+		expect(r.rest).toBe("Done.");
+	});
+	it("extracts a block with an escaped slash in the closing tag", () => {
+		const r = extractBlock(`Done.\n<protocol>\n${body}\n<\\/protocol>`, "protocol");
+		expect(r.body).toBe(body);
+		expect(r.rest).toBe("Done.");
+	});
+	it("extracts a block the model wrapped in a fence at the end of the answer", () => {
+		for (const fence of ["```", "```xml", "~~~"]) {
+			const close = fence.startsWith("~") ? "~~~" : "```";
+			const r = extractBlock(`Done.\n\n${fence}\n<protocol>\n${body}\n</protocol>\n${close}\n`, "protocol");
+			expect(r.body).toBe(body);
+			expect(r.rest).toBe("Done.");
+		}
+	});
+	it("extracts an escaped block inside a trailing fence", () => {
+		const r = extractBlock(`Done.\n\`\`\`\n&lt;protocol&gt;\n${body}\n&lt;/protocol&gt;\n\`\`\``, "protocol");
+		expect(r.body).toBe(body);
+		expect(r.rest).toBe("Done.");
+	});
+	it("keeps a trailing fenced example introduced with a colon", () => {
+		const text = `The format looks like this:\n\`\`\`\n<protocol>\n${body}\n</protocol>\n\`\`\``;
+		expect(extractBlock(text, "protocol")).toEqual({ body: undefined, rest: text });
+	});
+	it("keeps a fence that holds more than the block", () => {
+		const text = `Done.\n\`\`\`\nconst a = 1;\n<protocol>\n${body}\n</protocol>\n\`\`\``;
+		expect(extractBlock(text, "protocol").body).toBeUndefined();
+	});
+	it("leaves escaped tags inside code and in a sentence alone", () => {
+		const text = "Use `&lt;protocol&gt;` in docs, and \\<protocol\\> is mentioned here too.";
+		expect(extractBlock(text, "protocol")).toEqual({ body: undefined, rest: text });
+		expect(hideBlocks(text, "protocol", true)).toBe(text);
+	});
+	it("hides escaped and fenced blocks the same way it extracts them", () => {
+		expect(hideBlocks(`Hi\n&lt;protocol&gt;\n${body}\n&lt;/protocol&gt;`, "protocol", false)).toBe("Hi");
+		expect(hideBlocks(`Hi\n\`\`\`\n<protocol>\n${body}\n</protocol>\n\`\`\``, "protocol", false)).toBe("Hi");
+		expect(hideBlocks(`Hi\n\\<protocol\\>\n${body}`, "protocol", true)).toBe("Hi");
+	});
+	it("normalizes only what it recognizes", () => {
+		expect(normalizeBlockMarkup("a &lt;b&gt; c", "protocol")).toBe("a &lt;b&gt; c");
+		expect(normalizeBlockMarkup("&lt;PROTOCOL&gt;", "protocol")).toBe("<PROTOCOL>");
 	});
 });
 
